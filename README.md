@@ -1,5 +1,7 @@
 # Super DeepSeek
 
+[中文说明](README.zh-CN.md)
+
 Super DeepSeek is a local gateway for using DeepSeek and other OpenAI-compatible models with Claude Code, Codex CLI, and OpenAI-compatible clients.
 
 It is built for one practical goal: give strong text/code models a usable agent interface, including tool calls, Responses API compatibility, and a vision-worker path for image inputs.
