@@ -1,0 +1,309 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8787,
+    "public_base_url": "http://127.0.0.1:8787"
+  },
+  "security": {
+    "local_api_key": "sk-superds-local-change-me",
+    "bind_localhost_only": true,
+    "redact_secrets_in_logs": true
+  },
+  "runtime": {
+    "mode": "observe",
+    "default_profile": "default",
+    "trace_retention_days": 7,
+    "circuit_breaker": {
+      "failure_threshold": 3,
+      "success_threshold": 2,
+      "timeout_seconds": 60
+    },
+    "image_policy": "ocr"
+  },
+  "claude_code_compat": {
+    "enabled": true,
+    "billing_header_policy": "strip_for_non_anthropic_upstream",
+    "expose_claude_aliases": true,
+    "require_haiku_alias": true
+  },
+  "providers": [
+    {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "protocol": "openai",
+      "base_url": "https://api.deepseek.com/v1",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "api_key": "",
+      "default_model": "deepseek-v4-pro",
+      "capabilities": {
+        "vision": false,
+        "tools": true,
+        "reasoning_state": "reasoning_content",
+        "api_format": "openai_chat"
+      }
+    },
+    {
+      "id": "openrouter",
+      "name": "OpenRouter",
+      "protocol": "openai",
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "api_key": "",
+      "default_model": "anthropic/claude-haiku-4.5",
+      "capabilities": {
+        "vision": false,
+        "tools": true,
+        "reasoning_state": "anthropic_thinking",
+        "api_format": "openai_chat"
+      }
+    },
+    {
+      "id": "mimo",
+      "name": "Xiaomi MiMo",
+      "protocol": "openai",
+      "base_url": "https://api.xiaomimimo.com/v1",
+      "api_key_env": "MIMO_API_KEY",
+      "api_key": "",
+      "default_model": "mimo-v2.5",
+      "capabilities": {
+        "vision": false,
+        "tools": true,
+        "reasoning_state": "mimo_reasoning_content",
+        "api_format": "openai_chat"
+      }
+    },
+    {
+      "id": "siliconflow",
+      "name": "SiliconFlow",
+      "protocol": "openai",
+      "base_url": "https://api.siliconflow.cn/v1",
+      "api_key_env": "SILICONFLOW_API_KEY",
+      "api_key": "",
+      "default_model": "Qwen/Qwen3.6-27B"
+    },
+    {
+      "id": "kimi",
+      "name": "Kimi",
+      "protocol": "anthropic",
+      "base_url": "https://api.kimi.com/coding/v1",
+      "api_key_env": "KIMI_API_KEY",
+      "api_key": "",
+      "default_model": "kimi-k2.6",
+      "capabilities": {
+        "vision": false,
+        "tools": true,
+        "reasoning_state": "none",
+        "api_format": "openai_chat"
+      }
+    }
+  ],
+  "models": [
+    {
+      "id": "deepseek_main",
+      "provider_id": "deepseek",
+      "litellm_model": "openai/deepseek-chat",
+      "actual_model": "deepseek-chat",
+      "role": "main",
+      "capabilities": {
+        "vision": false,
+        "tools": true,
+        "reasoning_state": "reasoning_content",
+        "api_format": "openai_chat"
+      }
+    },
+    {
+      "id": "deepseek_fast",
+      "provider_id": "deepseek",
+      "litellm_model": "openai/deepseek-chat",
+      "actual_model": "deepseek-chat",
+      "role": "fast_tool",
+      "capabilities": {
+        "vision": false,
+        "tools": true,
+        "reasoning_state": "reasoning_content",
+        "api_format": "openai_chat"
+      }
+    },
+    {
+      "id": "deepseek_large",
+      "provider_id": "deepseek",
+      "litellm_model": "openai/deepseek-reasoner",
+      "actual_model": "deepseek-reasoner",
+      "role": "large",
+      "capabilities": {
+        "vision": false,
+        "tools": true,
+        "reasoning_state": "reasoning_content",
+        "api_format": "openai_chat"
+      }
+    },
+    {
+      "id": "mimo_reasoning",
+      "provider_id": "mimo",
+      "litellm_model": "openai/mimo-v2.5-pro",
+      "actual_model": "mimo-v2.5-pro",
+      "role": "large",
+      "capabilities": {
+        "vision": false,
+        "tools": true,
+        "reasoning_state": "mimo_reasoning_content",
+        "api_format": "openai_chat"
+      }
+    },
+    {
+      "id": "deepseek_deepseek_v4_pro",
+      "provider_id": "deepseek",
+      "litellm_model": "openai/deepseek-v4-pro",
+      "actual_model": "deepseek-v4-pro",
+      "role": "main",
+      "capabilities": {
+        "vision": false,
+        "tools": true,
+        "reasoning_state": "reasoning_content",
+        "api_format": "openai_chat"
+      },
+      "source": "provider_default"
+    },
+    {
+      "id": "openrouter_anthropic_claude_haiku_4_5",
+      "provider_id": "openrouter",
+      "litellm_model": "anthropic/claude-haiku-4.5",
+      "actual_model": "anthropic/claude-haiku-4.5",
+      "role": "main",
+      "capabilities": {
+        "vision": false,
+        "tools": true,
+        "reasoning_state": "anthropic_thinking",
+        "api_format": "openai_chat"
+      },
+      "source": "provider_default"
+    },
+    {
+      "id": "mimo_mimo_v2_5",
+      "provider_id": "mimo",
+      "litellm_model": "openai/mimo-v2.5",
+      "actual_model": "mimo-v2.5",
+      "role": "main",
+      "capabilities": {
+        "vision": false,
+        "tools": true,
+        "reasoning_state": "mimo_reasoning_content",
+        "api_format": "openai_chat"
+      },
+      "source": "provider_default"
+    },
+    {
+      "id": "siliconflow_qwen_qwen3_6_27b",
+      "provider_id": "siliconflow",
+      "litellm_model": "Qwen/Qwen3.6-27B",
+      "actual_model": "Qwen/Qwen3.6-27B",
+      "role": "main",
+      "capabilities": {
+        "api_format": "openai_chat",
+        "vision_status": "verified_supported",
+        "vision": true,
+        "vision_checked_at": 1779597462
+      },
+      "source": "provider_default"
+    },
+    {
+      "id": "kimi_kimi_k2_6",
+      "provider_id": "kimi",
+      "litellm_model": "kimi-k2.6",
+      "actual_model": "kimi-k2.6",
+      "role": "main",
+      "capabilities": {
+        "vision": false,
+        "tools": true,
+        "reasoning_state": "none",
+        "api_format": "openai_chat"
+      },
+      "source": "provider_default"
+    }
+  ],
+  "profiles": [
+    {
+      "id": "default",
+      "name": "Default",
+      "main_model": "deepseek_deepseek_v4_pro",
+      "fast_tool_model": "siliconflow_qwen_qwen3_6_27b",
+      "large_model": "deepseek_deepseek_v4_pro",
+      "verifier_model": "kimi_kimi_k2_6",
+      "failover": {
+        "main": [],
+        "fast_tool": [],
+        "large": [
+          "deepseek_main"
+        ],
+        "verifier": [
+          "deepseek_main"
+        ],
+        "default": []
+      },
+      "vision_model": "siliconflow_qwen_qwen3_6_27b",
+      "fallback_model": "openrouter_anthropic_claude_haiku_4_5"
+    }
+  ],
+  "model_aliases": [
+    {
+      "alias": "claude-haiku-4-5",
+      "profile_id": "default",
+      "role": "fast_tool",
+      "enabled": true
+    },
+    {
+      "alias": "claude-sonnet-4-6",
+      "profile_id": "default",
+      "role": "main",
+      "enabled": true
+    },
+    {
+      "alias": "claude-opus-4-7",
+      "profile_id": "default",
+      "role": "large",
+      "enabled": true
+    },
+    {
+      "alias": "claude-3-5-haiku-latest",
+      "profile_id": "default",
+      "role": "fast_tool",
+      "enabled": true
+    },
+    {
+      "alias": "claude-3-5-haiku-20241022",
+      "profile_id": "default",
+      "role": "fast_tool",
+      "enabled": true
+    },
+    {
+      "alias": "claude-3-7-sonnet-latest",
+      "profile_id": "default",
+      "role": "main",
+      "enabled": true
+    },
+    {
+      "alias": "claude-sonnet-4-5",
+      "profile_id": "default",
+      "role": "main",
+      "enabled": true
+    },
+    {
+      "alias": "claude-opus-4-1",
+      "profile_id": "default",
+      "role": "large",
+      "enabled": true
+    },
+    {
+      "alias": "super-main",
+      "profile_id": "default",
+      "role": "main",
+      "enabled": true
+    },
+    {
+      "alias": "super-verifier",
+      "profile_id": "default",
+      "role": "verifier",
+      "enabled": true
+    }
+  ]
+}
