@@ -36,7 +36,7 @@ function App() {
   const [drawer, setDrawer] = useStateApp(null);
   const [runtime, setRuntime] = useStateApp('augment');
   const [aliases, setAliases] = useStateApp(window.ALIASES);
-  const [traces, setTraces] = useStateApp(window.TRACES);
+  const [traces, setTraces] = useStateApp([]);
   const [providers, setProviders] = useStateApp(window.PROVIDERS);
   const [presets, setPresets] = useStateApp([]);
   const [modelCaps, setModelCaps] = useStateApp([]);
@@ -45,6 +45,7 @@ function App() {
   const [defaultProfile, setDefaultProfile] = useStateApp('default');
   const [health, setHealth] = useStateApp(null);
   const [serverOn, setServerOn] = useStateApp(true);
+  const [envCopied, setEnvCopied] = useStateApp(false);
   const [t, setTweak] = window.useTweaks ? window.useTweaks(TWEAK_DEFAULS) : [TWEAK_DEFAULS, ()=>{}];
 
   // Apply accent
@@ -60,13 +61,14 @@ function App() {
     let cancelled = false;
     const loadLiveData = async () => {
       try {
-        const [h, ps, prs, trs, caps, profileData] = await Promise.all([
+        const [h, ps, prs, trs, caps, profileData, aliasData] = await Promise.all([
           window.SuperDSApi.health(),
           window.SuperDSApi.providers(),
           window.SuperDSApi.presets(),
           window.SuperDSApi.traces(80),
           window.SuperDSApi.modelCapabilities(),
           window.SuperDSApi.profiles(),
+          window.SuperDSApi.aliases(),
         ]);
         if (cancelled) return;
         setHealth(h);
@@ -78,6 +80,7 @@ function App() {
         setProfiles(profileData.profiles);
         setModels(profileData.models);
         setDefaultProfile(profileData.defaultProfile);
+        setAliases(aliasData);
       } catch (e) {
         if (!cancelled) setServerOn(false);
       }
@@ -90,6 +93,30 @@ function App() {
   const goto = (id, ctx) => {
     setActive(id);
     if (id === 'traces') setTraceFocus(ctx || null);
+  };
+  const localEnvText = () => [
+    'export ANTHROPIC_BASE_URL="http://127.0.0.1:8787"',
+    `export ANTHROPIC_API_KEY="${window.SuperDSApi?.localKey || 'sk-superds-local-change-me'}"`,
+    'export OPENAI_BASE_URL="http://127.0.0.1:8787/openai/v1"',
+    `export OPENAI_API_KEY="${window.SuperDSApi?.localKey || 'sk-superds-local-change-me'}"`,
+  ].join('\n');
+  const copyLocalEnv = async () => {
+    const text = localEnvText();
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const el = document.createElement('textarea');
+      el.value = text;
+      el.setAttribute('readonly', '');
+      el.style.position = 'fixed';
+      el.style.opacity = '0';
+      document.body.appendChild(el);
+      el.select();
+      document.execCommand('copy');
+      document.body.removeChild(el);
+    }
+    setEnvCopied(true);
+    setTimeout(() => setEnvCopied(false), 1400);
   };
 
   const meta = PAGE_META[active];
@@ -123,7 +150,7 @@ function App() {
         </div>
 
         <span className="chip">
-          <Icon name="layers" size={11}/> 方案：<span className="mono" style={{ color: 'var(--text)' }}>default</span>
+          <Icon name="layers" size={11}/> 方案：<span className="mono" style={{ color: 'var(--text)' }}>{defaultProfile}</span>
         </span>
 
         <div className="spacer" />
@@ -138,8 +165,13 @@ function App() {
           </span>
         )}
 
-        <button className="btn-mini primary"><Icon name="copy" size={11}/> 复制本地环境变量</button>
-        <button className="btn-mini"><Icon name="trash" size={11}/> 清空日志</button>
+        <button className="btn-mini primary" onClick={copyLocalEnv}>
+          <Icon name={envCopied ? 'check' : 'copy'} size={11}/> {envCopied ? '已复制' : '复制本地环境变量'}
+        </button>
+        <button className="btn-mini" onClick={async () => {
+          if (window.SuperDSApi) await window.SuperDSApi.clearLogs();
+          setTraces([]);
+        }}><Icon name="trash" size={11}/> 清空日志</button>
       </div>
 
       {/* ============ SIDEBAR ============ */}
@@ -232,7 +264,7 @@ function App() {
             onModelCapsChange={setModelCaps}
           />
         )}
-        {active === 'claude'    && <PageClaude    aliases={aliases} setAliases={setAliases} showHaikuWarning={t.showHaikuWarning} />}
+        {active === 'claude'    && <PageClaude    aliases={aliases} setAliases={setAliases} profiles={profiles} showHaikuWarning={t.showHaikuWarning} />}
         {active === 'traces'    && <PageTraces    initialId={traceFocus} traces={traces} setTraces={setTraces} />}
         {active === 'sanitizer' && <PageSanitizer />}
         {active === 'settings'  && <PageSettings  runtime={runtime} setRuntime={setRuntime} />}
@@ -279,22 +311,34 @@ function App() {
 function ProviderDrawer({ drawer, onClose, onSaved }) {
   const p = drawer.payload || {};
   const isEdit = drawer.kind === 'provider-edit';
+  const initialModels = normalizeModelListApp(p.models || p.suggestedModels || p.defaultModel || '');
   const [name, setName] = useStateApp(p.name || '');
   const [protocol, setProtocol] = useStateApp((p.protocol || '').includes('Anthropic') ? 'anthropic' : 'openai');
   const [baseUrl, setBaseUrl] = useStateApp(p.baseUrl || '');
   const [apiKeyEnv, setApiKeyEnv] = useStateApp(p.apiKeyEnv || p.api_key_env || '');
   const [apiKey, setApiKey] = useStateApp('');
   const [defaultModel, setDefaultModel] = useStateApp(p.defaultModel || '');
+  const [modelText, setModelText] = useStateApp(initialModels.join('\n'));
   const [saving, setSaving] = useStateApp(false);
-  const providerPayload = () => ({
-    id: p.id,
-    name,
-    protocol,
-    base_url: baseUrl,
-    api_key_env: apiKeyEnv,
-    api_key: apiKey,
-    default_model: defaultModel,
-  });
+  const modelList = () => normalizeModelListApp(modelText);
+  const providerPayload = () => {
+    const models = modelList();
+    return {
+      id: p.id,
+      name,
+      protocol,
+      base_url: baseUrl,
+      api_key_env: apiKeyEnv,
+      api_key: apiKey,
+      default_model: defaultModel || models[0] || '',
+      models,
+    };
+  };
+  const addModel = (model) => {
+    const next = normalizeModelListApp([...modelList(), model]);
+    setModelText(next.join('\n'));
+    if (!defaultModel && model) setDefaultModel(model);
+  };
   const save = async () => {
     setSaving(true);
     try {
@@ -330,7 +374,33 @@ function ProviderDrawer({ drawer, onClose, onSaved }) {
           <Field2 label="Base URL"><input className="input mono" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://api.example.com/v1" /></Field2>
           <Field2 label="环境变量名"><input className="input mono" value={apiKeyEnv} onChange={(e) => setApiKeyEnv(e.target.value)} placeholder="DEEPSEEK_API_KEY" /></Field2>
           <Field2 label="API Key"><SecretInput value={apiKey} onChange={setApiKey} placeholder={isEdit && p.apiKeyStatus === 'configured' ? '留空则保留已保存密钥' : 'sk-...'} /></Field2>
-          <Field2 label="默认模型"><input className="input mono" value={defaultModel} onChange={(e) => setDefaultModel(e.target.value)} /></Field2>
+          <Field2 label="模型列表">
+            <textarea
+              className="input mono"
+              value={modelText}
+              onChange={(e) => {
+                setModelText(e.target.value);
+                const next = normalizeModelListApp(e.target.value);
+                if (!defaultModel && next[0]) setDefaultModel(next[0]);
+              }}
+              placeholder={'deepseek-chat\ndeepseek-reasoner'}
+              rows={5}
+              style={{ resize: 'vertical', minHeight: 112, lineHeight: 1.5 }}
+            />
+            {p.suggestedModels?.length > 0 && (
+              <div className="row" style={{ gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
+                {p.suggestedModels.map(m => (
+                  <button key={m} className="btn-mini mono" onClick={() => addModel(m)}>{m}</button>
+                ))}
+              </div>
+            )}
+          </Field2>
+          <Field2 label="默认模型">
+            <select className="select mono" value={defaultModel} onChange={(e) => setDefaultModel(e.target.value)}>
+              <option value="">使用第一个模型</option>
+              {modelList().map(m => <option key={m} value={m}>{m}</option>)}
+            </select>
+          </Field2>
           <Field2 label="LiteLLM 模型字符串（可选）"><input className="input mono" placeholder="openai/deepseek-chat" /></Field2>
           <div className="grid grid-2">
             <Field2 label="超时 (ms)"><input className="input mono" defaultValue="30000" /></Field2>
@@ -346,6 +416,18 @@ function ProviderDrawer({ drawer, onClose, onSaved }) {
       </div>
     </>
   );
+}
+function normalizeModelListApp(raw) {
+  const rows = Array.isArray(raw) ? raw : String(raw || '').split(/[\n,]+/);
+  const out = [];
+  const seen = new Set();
+  rows.forEach(item => {
+    const value = (typeof item === 'object' ? item?.id || item?.actual_model : item || '').trim();
+    if (!value || seen.has(value)) return;
+    seen.add(value);
+    out.push(value);
+  });
+  return out;
 }
 function Field2({ label, children }) {
   return (

@@ -4,22 +4,35 @@ const { useState: useStateA, useMemo: useMemoA, useEffect: useEffectA } = React;
 // ============ Page: Overview ============
 function PageOverview({ goto, traces, providers = window.PROVIDERS }) {
   const recent = traces.slice(0, 8);
+  const totalRequests = traces.length;
+  const successful = traces.filter(t => t.status === 'success').length;
+  const successRate = totalRequests ? ((successful / totalRequests) * 100).toFixed(1) : '0';
+  const avgLatency = totalRequests ? Math.round(traces.reduce((sum, t) => sum + (t.latencyMs || 0), 0) / totalRequests) : 0;
+  const inputTokens = traces.reduce((sum, t) => sum + (t.inputTokens || 0), 0);
+  const outputTokens = traces.reduce((sum, t) => sum + (t.outputTokens || 0), 0);
+  const totalCost = traces.reduce((sum, t) => sum + (t.costUsd || 0), 0);
+  const strippedCount = traces.filter(t => t.sanitizer === 'cch stripped').length;
+  const volumeSeries = tracesToHourlySeries(traces);
+  const strippedSeries = tracesToHourlySeries(traces.filter(t => t.sanitizer === 'cch stripped'));
+  const zeroSeries = Array.from({ length: 48 }, () => 0);
+  const chartSeries = totalRequests ? volumeSeries : zeroSeries;
+  const fmtCompact = (n) => n >= 1000000 ? `${(n / 1000000).toFixed(2)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
   return (
     <div className="col" style={{ gap: 14 }}>
       <div className="grid grid-4">
-        <MetricCard label="今日请求" value="1,842" delta={{ dir: 'up', value: '+12.4%' }} icon="activity" spark={window.VOLUME_24H} />
-        <MetricCard label="成功率"   value="99.2" unit="%" delta={{ dir: 'up', value: '+0.3%' }} icon="check" spark={window.VOLUME_24H.map(v => v * 0.92)} />
-        <MetricCard label="平均延迟" value="842" unit="ms" delta={{ dir: 'down', value: '−84ms' }} icon="gauge" spark={window.VOLUME_24H.map((v,i)=>1200-v*8 + i*2)} />
-        <MetricCard label="预估开销" value="$3.42" delta={{ dir: 'up', value: '+$0.81' }} icon="zap" spark={window.VOLUME_24H.map(v=>v*0.7)} />
+        <MetricCard label="今日请求" value={String(totalRequests)} icon="activity" spark={chartSeries} />
+        <MetricCard label="成功率"   value={successRate} unit="%" icon="check" spark={chartSeries} />
+        <MetricCard label="平均延迟" value={String(avgLatency)} unit="ms" icon="gauge" spark={chartSeries} />
+        <MetricCard label="预估开销" value={`$${totalCost.toFixed(4)}`} icon="zap" spark={chartSeries} />
       </div>
       <div className="grid grid-4">
-        <MetricCard label="输入 Token"   value="2.31M" icon="arrow-right" />
-        <MetricCard label="输出 Token"   value="184K"  icon="arrow-right" />
-        <MetricCard label="缓存友好请求" value="76.4" unit="%" icon="database" />
-        <MetricCard label="清洗的账单头" value="1,422" icon="broom" />
+        <MetricCard label="输入 Token"   value={fmtCompact(inputTokens)} icon="arrow-right" />
+        <MetricCard label="输出 Token"   value={fmtCompact(outputTokens)}  icon="arrow-right" />
+        <MetricCard label="缓存友好请求" value={totalRequests ? ((strippedCount / totalRequests) * 100).toFixed(1) : '0'} unit="%" icon="database" />
+        <MetricCard label="清洗的账单头" value={String(strippedCount)} icon="broom" />
       </div>
 
-      <div className="grid" style={{ gridTemplateColumns: '1.6fr 1fr', alignItems: 'stretch' }}>
+      <div className="grid overview-grid">
         <div className="card">
           <div className="card-h">
             <div className="t"><Icon name="activity" size={14} /> 请求量 · 最近 24 小时</div>
@@ -33,9 +46,9 @@ function PageOverview({ goto, traces, providers = window.PROVIDERS }) {
           <div className="card-b" style={{ padding: '6px 6px 0' }}>
             <AreaChart
               series={[
-                { name: '请求', data: window.VOLUME_24H, color: '#5eead4' },
-                { name: '缓存友好', data: window.CACHE_SAFE_24H, color: '#60a5fa', fill: false },
-                { name: '已清洗', data: window.SANITIZED_24H, color: '#c084fc', fill: false },
+                { name: '请求', data: chartSeries, color: '#5eead4' },
+                { name: '缓存友好', data: totalRequests ? strippedSeries : zeroSeries, color: '#60a5fa', fill: false },
+                { name: '已清洗', data: totalRequests ? strippedSeries : zeroSeries, color: '#c084fc', fill: false },
               ]}
               labels={Array.from({length:48},(_,i)=>{const h=Math.floor(i/2);return `${String(h).padStart(2,'0')}:${i%2?'30':'00'}`})}
               height={210}
@@ -100,12 +113,31 @@ function PageOverview({ goto, traces, providers = window.PROVIDERS }) {
                   </td>
                 </tr>
               ))}
+              {recent.length === 0 && (
+                <tr>
+                  <td colSpan="8"><div className="empty">暂无请求历史。</div></td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
       </div>
     </div>
   );
+}
+
+function tracesToHourlySeries(traces) {
+  const series = Array.from({ length: 48 }, () => 0);
+  const now = Date.now();
+  traces.forEach(t => {
+    const started = t.raw?.started_at ? t.raw.started_at * 1000 : t.timeFull?.getTime?.();
+    if (!started) return;
+    const ageMs = now - started;
+    if (ageMs < 0 || ageMs > 24 * 60 * 60 * 1000) return;
+    const bucket = 47 - Math.floor(ageMs / (30 * 60 * 1000));
+    if (bucket >= 0 && bucket < series.length) series[bucket] += 1;
+  });
+  return series;
 }
 
 // ============ Page: Setup Wizard ============
@@ -317,6 +349,7 @@ function PageProviders({ openDrawer, providers = window.PROVIDERS, presets = [],
         baseUrl: preset.base_url,
         apiKeyEnv: preset.api_key_env,
         defaultModel: preset.default_model,
+        models: existing.models || preset.suggested_models || [preset.default_model].filter(Boolean),
         suggestedModels: preset.suggested_models || [],
       },
     });
@@ -364,21 +397,21 @@ function PageProviders({ openDrawer, providers = window.PROVIDERS, presets = [],
             />
           </div>
           <div className="card-b">
-            <div className="grid grid-4">
+            <div className="grid grid-4 preset-grid">
               {shownPresets.slice(0, 8).map(p => (
-                <button key={p.id} className="prov-card" onClick={() => applyPreset(p)} style={{ minHeight: 110, textAlign: 'left', cursor: 'pointer' }}>
+                <button key={p.id} className="prov-card preset-card" onClick={() => applyPreset(p)}>
                   <div className="row" style={{ justifyContent: 'space-between' }}>
                     <div className="logo" style={{ background: providerColorLocal(p.id) + '22', color: providerColorLocal(p.id), border: `1px solid ${providerColorLocal(p.id)}55` }}>
                       {(p.name || p.id).replace(/[^A-Za-z0-9]/g, '').slice(0, 2).toUpperCase()}
                     </div>
                     <span className="badge neutral">{p.category}</span>
                   </div>
-                  <div>
-                    <div style={{ fontWeight: 600 }}>{p.name}</div>
-                    <div className="muted tiny mono" style={{ marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.base_url}</div>
+                  <div className="preset-card-main">
+                    <div className="preset-card-title">{p.name}</div>
+                    <div className="preset-card-url muted tiny mono">{p.base_url}</div>
                   </div>
-                  <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
-                    <div className="mono tiny text-accent" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.default_model}</div>
+                  <div className="row preset-card-foot" style={{ justifyContent: 'space-between', gap: 8 }}>
+                    <div className="preset-card-model mono tiny">{p.default_model}</div>
                     <span className="badge accent">使用</span>
                   </div>
                 </button>
@@ -417,6 +450,7 @@ function PageProviders({ openDrawer, providers = window.PROVIDERS, presets = [],
             <div className="col" style={{ gap: 4 }}>
               <div className="kv"><span className="k">URL</span><span className="v" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 220 }}>{p.baseUrl}</span></div>
               <div className="kv"><span className="k">默认模型</span><span className="v">{p.defaultModel}</span></div>
+              <div className="kv"><span className="k">模型数量</span><span className="v">{(p.models || []).length || (p.defaultModel ? 1 : 0)}</span></div>
               <div className="kv"><span className="k">API Key</span>
                 <span className="v">{p.apiKeyMask}</span>
                 {p.apiKeyStatus === 'configured' ? <span className="badge ok" style={{ marginLeft: 6 }}><span className="dot"/>已配置</span> : <span className="badge err" style={{ marginLeft: 6 }}><span className="dot"/>缺失</span>}
@@ -504,19 +538,12 @@ function PageProfiles({ modelCaps = [], profiles = [], models = [], providers = 
   const modelProvider = (model) => providers.find(p => p.id === model?.provider_id);
   const groupedModels = useMemoA(() => {
     const selectedIds = new Set(PROFILE_ROLE_DEFS.map(r => draft[r.key]).filter(Boolean));
-    const currentByProvider = [];
     const usedIds = new Set();
-    for (const provider of providers) {
-      const matches = models.filter(m => m.provider_id === provider.id && m.actual_model === provider.defaultModel);
-      const preferred = matches.find(m => m.source === 'provider_default') || matches[0];
-      if (preferred) {
-        currentByProvider.push(preferred);
-        usedIds.add(preferred.id);
-      }
-    }
+    const currentModels = models.filter(m => providers.some(p => p.id === m.provider_id));
+    currentModels.forEach(m => usedIds.add(m.id));
     const legacySelected = models.filter(m => selectedIds.has(m.id) && !usedIds.has(m.id));
     const rows = {};
-    for (const model of currentByProvider) {
+    for (const model of currentModels) {
       const provider = modelProvider(model);
       const key = provider?.id || model.provider_id || 'unknown';
       if (!rows[key]) rows[key] = { provider, label: provider?.name || key, models: [] };
@@ -579,7 +606,7 @@ function PageProfiles({ modelCaps = [], profiles = [], models = [], providers = 
   const visionLabel = (caps) => caps.vision_status === 'verified_supported' ? '可看图' : caps.vision_status === 'verified_unsupported' ? '不能看图' : '未检测';
   const visionTone = (caps) => caps.vision_status === 'verified_supported' ? 'ok' : caps.vision_status === 'verified_unsupported' ? 'err' : 'warn';
   return (
-    <div className="grid" style={{ gridTemplateColumns: '260px 1fr', gap: 14, alignItems: 'start' }}>
+    <div className="grid profile-layout">
       <div className="card">
         <div className="card-h">
           <div className="t"><Icon name="layers" size={14} /> 方案</div>
@@ -649,15 +676,16 @@ function PageProfiles({ modelCaps = [], profiles = [], models = [], providers = 
             </div>
             <div className="role-row" style={{ borderBottom: '1px solid var(--line)', background: 'var(--bg-1)' }}>
               <div className="label">角色</div>
-              <div className="label">当前选择</div>
-              <div className="label">LiteLLM 模型字符串</div>
               <div className="label">选择模型</div>
+              <div className="label">LiteLLM 模型字符串</div>
+              <div className="label">状态</div>
             </div>
             {PROFILE_ROLE_DEFS.map(r => {
               const selected = models.find(m => m.id === draft[r.key]);
               const p = modelProvider(selected);
               const caps = modelCaps.find(m => m.id === selected?.id)?.capabilities || {};
               const isCurrentDefault = Boolean(p && selected?.actual_model === p.defaultModel);
+              const isKnownProviderModel = Boolean(p && (p.models || []).includes(selected?.actual_model));
               const isFastTool = r.role === 'fast_tool';
               return (
                 <div key={r.role} className="role-row">
@@ -670,25 +698,6 @@ function PageProfiles({ modelCaps = [], profiles = [], models = [], providers = 
                     <div className="role-desc">{r.desc}</div>
                   </div>
                   <div className="profile-model-cell">
-                    {p ? (
-                      <div className="row" style={{ gap: 8 }}>
-                        <div className="logo" style={{ width: 22, height: 22, fontSize: 10, background: p.color + '22', color: p.color, border: `1px solid ${p.color}55` }}>{p.short}</div>
-                        <div style={{ minWidth: 0 }}>
-                          <div className="mono tiny">{selected.actual_model}</div>
-                          <div className="muted tiny">{p.name} · {isCurrentDefault ? '当前默认' : '旧配置'}</div>
-                        </div>
-                      </div>
-                    ) : <span className="muted tiny">— 未配置 —</span>}
-                  </div>
-                  <div className="mono tiny muted">{selected?.litellm_model || '—'}</div>
-                  <div className="profile-picker">
-                    <div className="row" style={{ gap: 4, flexWrap: 'wrap' }}>
-                      <span className={`badge ${isCurrentDefault ? 'ok' : 'warn'}`}>{isCurrentDefault ? '当前' : selected ? '旧配置' : '未选'}</span>
-                      {r.role === 'vision'
-                        ? <span className={`badge ${visionTone(caps)}`}>{visionLabel(caps)}</span>
-                        : <span className="badge neutral">{draft.vision_model ? '图片走视觉' : '无视觉角色'}</span>}
-                      <span className={`badge ${caps.tools ? 'ok' : 'neutral'}`}>{caps.tools ? 'tools' : 'no tools'}</span>
-                    </div>
                     <select className="select mono profile-model-select" value={draft[r.key] || ''} onChange={(e) => updateDraft(r.key, e.target.value)}>
                       <option value="">未配置</option>
                       {groupedModels.map(([providerId, group]) => (
@@ -699,6 +708,21 @@ function PageProfiles({ modelCaps = [], profiles = [], models = [], providers = 
                         </optgroup>
                       ))}
                     </select>
+                    <div className="profile-model-sub">
+                      {p ? (
+                        <span>{p.name} · {isCurrentDefault ? '默认' : isKnownProviderModel ? '已配置' : '旧配置'}</span>
+                      ) : <span>未配置</span>}
+                    </div>
+                  </div>
+                  <div className="mono tiny muted">{selected?.litellm_model || '—'}</div>
+                  <div className="profile-picker">
+                    <div className="row" style={{ gap: 4, flexWrap: 'wrap' }}>
+                      <span className={`badge ${isKnownProviderModel ? 'ok' : 'warn'}`}>{isCurrentDefault ? '默认' : isKnownProviderModel ? '已配置' : selected ? '旧配置' : '未选'}</span>
+                      {r.role === 'vision'
+                        ? <span className={`badge ${visionTone(caps)}`}>{visionLabel(caps)}</span>
+                        : <span className="badge neutral">{draft.vision_model ? '图片走视觉' : '无视觉角色'}</span>}
+                      <span className={`badge ${caps.tools ? 'ok' : 'neutral'}`}>{caps.tools ? 'tools' : 'no tools'}</span>
+                    </div>
                   </div>
                 </div>
               );

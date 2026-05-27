@@ -129,7 +129,7 @@ const AreaChart = ({ series, height = 180, labels }) => {
   const innerH = H - padT - padB;
   const n = series[0].data.length;
   const allVals = series.flatMap(s => s.data);
-  const maxV = Math.ceil(Math.max(...allVals) * 1.15);
+  const maxV = Math.max(1, Math.ceil(Math.max(...allVals) * 1.15));
   const ticks = [0, Math.round(maxV / 2), maxV];
 
   const xOf = (i) => padL + (i / (n - 1)) * innerW;

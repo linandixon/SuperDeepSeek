@@ -1,17 +1,18 @@
 import unittest
 import asyncio
 
-from backend.app.adapters import anthropic_payload, anthropic_to_openai_payload, responses_tools_to_openai
+from backend.app.adapters import anthropic_payload, anthropic_to_openai_payload, openai_to_anthropic_response, responses_tools_to_openai
 from backend.app.alias_resolver import AliasResolver
 from backend.app.billing_header_sanitizer import sanitize_system_first_line
 from backend.app.circuit_breaker import CircuitBreaker, CircuitBreakerConfig
 from backend.app.capabilities import model_capabilities
 from backend.app.defaults import default_config
-from backend.app.main import ensure_provider_default_models, normalize_profile_payload, openai_to_responses_response, remove_provider_from_config, responses_body_with_cached_context
+from backend.app.main import canonical_provider_model, ensure_provider_default_models, normalize_profile_payload, normalize_provider_payload, openai_to_responses_response, remove_provider_from_config, responses_body_with_cached_context
 from backend.app.multimodal import detect_images, inject_evidence_into_chat_payload, make_evidence_packets, responses_input_to_messages
 from backend.app.provider_presets import load_provider_presets
 from backend.app.provider_router import ProviderRouter
 from backend.app.reasoning_state import extract_opaque_reasoning, validate_mimo_reasoning_history
+from backend.app.security import token_from_headers
 from backend.app.secret_redaction import redact_text
 from backend.app.upstream import test_connection
 
@@ -181,6 +182,60 @@ class AdapterTests(unittest.TestCase):
         )
         self.assertEqual(payload["messages"][0]["content"][1]["type"], "image_url")
 
+    def test_anthropic_tool_history_converts_to_openai_tool_messages(self):
+        resolved = AliasResolver(default_config()).resolve("claude-3-5-haiku-latest")
+        payload, _ = anthropic_to_openai_payload(
+            {
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": "I'll inspect it."},
+                            {"type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {"path": "README.md"}},
+                        ],
+                    },
+                    {
+                        "role": "user",
+                        "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "hello"}],
+                    },
+                ]
+            },
+            {},
+            resolved,
+            "strip_for_non_anthropic_upstream",
+        )
+        self.assertEqual(payload["messages"][0]["role"], "assistant")
+        self.assertEqual(payload["messages"][0]["tool_calls"][0]["id"], "toolu_1")
+        self.assertEqual(payload["messages"][1]["role"], "tool")
+        self.assertEqual(payload["messages"][1]["tool_call_id"], "toolu_1")
+
+    def test_openai_tool_calls_convert_to_anthropic_tool_use(self):
+        response = openai_to_anthropic_response(
+            {
+                "id": "chatcmpl_1",
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {"name": "read_file", "arguments": "{\"path\":\"README.md\"}"},
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+            },
+            "claude-haiku-4-5",
+        )
+        self.assertEqual(response["stop_reason"], "tool_use")
+        self.assertEqual(response["content"][0]["type"], "tool_use")
+        self.assertEqual(response["content"][0]["input"]["path"], "README.md")
+
     def test_responses_tools_convert_to_openai_chat_tools(self):
         tools = responses_tools_to_openai(
             [
@@ -212,7 +267,31 @@ class ProviderPresetTests(unittest.TestCase):
         self.assertIn("ollama", ids)
 
 
+class LocalAuthTests(unittest.TestCase):
+    def test_accepts_common_api_key_header_shapes(self):
+        self.assertEqual(token_from_headers({"authorization": "Bearer sk-local"}), "sk-local")
+        self.assertEqual(token_from_headers({"authorization": "sk-local"}), "sk-local")
+        self.assertEqual(token_from_headers({"api-key": "sk-local"}), "sk-local")
+        self.assertEqual(token_from_headers({"anthropic-api-key": "sk-local"}), "sk-local")
+
+
 class ProviderConfigTests(unittest.TestCase):
+    def test_deepinfra_gpt_oss_model_is_canonicalized(self):
+        self.assertEqual(
+            canonical_provider_model("deepinfra", "https://api.deepinfra.com/v1/openai", "gpt-oss-120b"),
+            "openai/gpt-oss-120b",
+        )
+        provider = normalize_provider_payload(
+            {
+                "id": "deepinfra",
+                "base_url": "https://api.deepinfra.com/v1/openai",
+                "default_model": "gpt-oss-120b",
+                "models": ["gpt-oss-120b", "openai/gpt-oss-120b"],
+            }
+        )
+        self.assertEqual(provider["default_model"], "openai/gpt-oss-120b")
+        self.assertEqual(provider["models"], ["openai/gpt-oss-120b"])
+
     def test_removing_provider_cleans_models_and_profile_refs(self):
         config = default_config()
         self.assertTrue(remove_provider_from_config(config, "deepseek"))
@@ -250,6 +329,35 @@ class ProviderConfigTests(unittest.TestCase):
         )
         self.assertTrue(ensure_provider_default_models(config))
         self.assertTrue(any(m["provider_id"] == "custom" and m["actual_model"] == "custom-model-1" for m in config["models"]))
+
+    def test_provider_models_become_selectable_models(self):
+        config = default_config()
+        config["providers"].append(
+            {
+                "id": "custom",
+                "name": "Custom",
+                "protocol": "openai",
+                "base_url": "https://example.com/v1",
+                "api_key": "",
+                "default_model": "custom-model-1",
+                "models": ["custom-model-1", "custom-model-2"],
+                "capabilities": {"vision": False, "tools": True},
+            }
+        )
+        self.assertTrue(ensure_provider_default_models(config))
+        actual = {m["actual_model"] for m in config["models"] if m["provider_id"] == "custom"}
+        self.assertEqual(actual, {"custom-model-1", "custom-model-2"})
+
+    def test_provider_payload_accepts_newline_model_list(self):
+        provider = normalize_provider_payload(
+            {
+                "id": "custom",
+                "name": "Custom",
+                "default_model": "custom-model-1",
+                "models": "custom-model-1\ncustom-model-2, custom-model-2",
+            }
+        )
+        self.assertEqual(provider["models"], ["custom-model-1", "custom-model-2"])
 
 
 class StreamCheckTests(unittest.TestCase):

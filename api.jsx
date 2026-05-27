@@ -47,6 +47,7 @@ function toProviderCard(provider) {
     apiKeyStatus: provider.api_key ? 'configured' : 'missing',
     apiKeyMask: provider.apiKeyMask || maskKey(provider),
     defaultModel: provider.default_model || provider.defaultModel || '',
+    models: provider.models || (provider.default_model || provider.defaultModel ? [provider.default_model || provider.defaultModel] : []),
     lastTested: provider.last_tested || '尚未测试',
     latency: provider.latency_ms || null,
     status: provider.status || (provider.api_key ? 'unknown' : 'failed'),
@@ -96,14 +97,33 @@ window.SuperDSApi = {
     const data = await apiJson('/api/providers');
     return (data.data || []).map(toProviderCard);
   },
+  async aliases() {
+    const data = await apiJson('/api/aliases');
+    return data.data || [];
+  },
+  async saveAlias(alias) {
+    const data = await apiJson('/api/aliases', {
+      method: 'POST',
+      body: JSON.stringify(alias),
+    });
+    return data.data || [];
+  },
+  async deleteAlias(aliasName) {
+    const data = await apiJson(`/api/aliases/${encodeURIComponent(aliasName)}`, {
+      method: 'DELETE',
+    });
+    return data.data || [];
+  },
   async presets() {
     const data = await apiJson('/api/provider-presets');
     return data.data || [];
   },
   async traces(limit = 100) {
     const data = await apiJson(`/api/traces?limit=${limit}`);
-    const rows = (data.data || []).map(fromBackendTrace);
-    return rows.length ? rows : window.TRACES;
+    return (data.data || []).map(fromBackendTrace);
+  },
+  async clearLogs() {
+    return apiJson('/api/logs/clear', { method: 'POST' });
   },
   async modelCapabilities() {
     const data = await apiJson('/api/model-capabilities');

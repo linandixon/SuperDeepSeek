@@ -139,8 +139,29 @@ class ProviderRouter:
 
     def _sanitize_for_resolved(self, payload: dict, resolved: ResolvedModel) -> dict:
         caps = model_capabilities(self.config, resolved)
+        payload = self._disable_thinking_for_fast_tool(payload, resolved)
+        if resolved.role == "fast_tool":
+            return self._strip_reasoning_content(payload)
         if caps.get("reasoning_state") in {"reasoning_content", "mimo_reasoning_content"}:
             return payload
+        return self._strip_reasoning_content(payload)
+
+    def _disable_thinking_for_fast_tool(self, payload: dict, resolved: ResolvedModel) -> dict:
+        if resolved.role != "fast_tool":
+            return payload
+        out = dict(payload)
+        for key in [
+            "reasoning",
+            "reasoning_effort",
+            "thinking",
+            "thinking_budget",
+            "enable_thinking",
+            "include_reasoning",
+        ]:
+            out.pop(key, None)
+        return out
+
+    def _strip_reasoning_content(self, payload: dict) -> dict:
         out = dict(payload)
         messages = []
         changed = False

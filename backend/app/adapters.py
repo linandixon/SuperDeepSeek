@@ -1,3 +1,4 @@
+import json
 from typing import Any, Dict, List, Tuple
 
 from .billing_header_sanitizer import (
@@ -80,6 +81,64 @@ def anthropic_content_to_openai(content: Any) -> Any:
     return "\n".join(b.get("text", "") for b in out if b.get("type") == "text")
 
 
+def _json_dumps(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value if value is not None else {}, ensure_ascii=False)
+
+
+def _openai_messages_from_anthropic_message(msg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    role = msg.get("role", "user")
+    content = msg.get("content", "")
+    if role == "assistant" and isinstance(content, list):
+        text_parts = []
+        tool_calls = []
+        for block in content:
+            if not isinstance(block, dict):
+                text_parts.append(str(block))
+                continue
+            if block.get("type") == "text":
+                text_parts.append(block.get("text", ""))
+            elif block.get("type") == "tool_use":
+                tool_calls.append(
+                    {
+                        "id": block.get("id") or f"call_{len(tool_calls)}",
+                        "type": "function",
+                        "function": {
+                            "name": block.get("name", ""),
+                            "arguments": _json_dumps(block.get("input", {})),
+                        },
+                    }
+                )
+        out = {"role": "assistant", "content": "\n".join(p for p in text_parts if p)}
+        if tool_calls:
+            out["tool_calls"] = tool_calls
+        return [out]
+    if role == "user" and isinstance(content, list):
+        messages = []
+        text_blocks = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                if text_blocks:
+                    messages.append({"role": "user", "content": anthropic_content_to_openai(text_blocks)})
+                    text_blocks = []
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": block.get("tool_use_id") or block.get("id") or "",
+                        "content": content_to_text(block.get("content", "")),
+                    }
+                )
+            else:
+                text_blocks.append(block)
+        if text_blocks:
+            messages.append({"role": "user", "content": anthropic_content_to_openai(text_blocks)})
+        return messages or [{"role": "user", "content": ""}]
+    if role not in {"user", "assistant", "system", "tool"}:
+        role = "user"
+    return [{"role": role, "content": anthropic_content_to_openai(content)}]
+
+
 def anthropic_system_to_text(system: Any) -> str:
     if isinstance(system, str):
         return system
@@ -138,10 +197,7 @@ def anthropic_to_openai_payload(
     if system:
         messages.append({"role": "system", "content": system})
     for msg in body.get("messages", []):
-        role = msg.get("role", "user")
-        if role not in {"user", "assistant", "system", "tool"}:
-            role = "user"
-        messages.append({"role": role, "content": anthropic_content_to_openai(msg.get("content", ""))})
+        messages.extend(_openai_messages_from_anthropic_message(msg))
 
     payload = {"model": resolved.actual_model, "messages": messages, "stream": bool(body.get("stream", False))}
     for key in ANTHROPIC_TO_OPENAI_PASSTHROUGH:
@@ -154,7 +210,17 @@ def anthropic_to_openai_payload(
     if body.get("tools"):
         payload["tools"] = anthropic_tools_to_openai(body.get("tools", []))
     if body.get("tool_choice"):
-        payload["tool_choice"] = body["tool_choice"] if isinstance(body["tool_choice"], str) else "auto"
+        choice = body["tool_choice"]
+        if isinstance(choice, str):
+            payload["tool_choice"] = choice
+        elif isinstance(choice, dict) and choice.get("type") == "tool" and choice.get("name"):
+            payload["tool_choice"] = {"type": "function", "function": {"name": choice["name"]}}
+        elif isinstance(choice, dict) and choice.get("type") == "any":
+            payload["tool_choice"] = "required"
+        elif isinstance(choice, dict) and choice.get("type") in {"auto", "none"}:
+            payload["tool_choice"] = choice["type"]
+        else:
+            payload["tool_choice"] = "auto"
     payload["_superds_sanitized_headers"] = clean_headers
     return payload, report
 
@@ -188,14 +254,34 @@ def openai_to_anthropic_response(openai_response: Dict[str, Any], request_model:
     choice = (openai_response.get("choices") or [{}])[0]
     message = choice.get("message") or {}
     text = message.get("content") or ""
+    reasoning_text = message.get("reasoning_content") or ""
+    content = []
+    if text:
+        content.append({"type": "text", "text": text})
+    for call in message.get("tool_calls") or []:
+        function = call.get("function") or {}
+        try:
+            arguments = json.loads(function.get("arguments") or "{}")
+        except json.JSONDecodeError:
+            arguments = {}
+        content.append(
+            {
+                "type": "tool_use",
+                "id": call.get("id") or f"call_{len(content)}",
+                "name": function.get("name", ""),
+                "input": arguments,
+            }
+        )
+    if not content:
+        content = [{"type": "text", "text": reasoning_text}]
     usage = openai_response.get("usage") or {}
     return {
         "id": openai_response.get("id", "msg_superds"),
         "type": "message",
         "role": "assistant",
         "model": request_model,
-        "content": [{"type": "text", "text": text}],
-        "stop_reason": choice.get("finish_reason") or "end_turn",
+        "content": content,
+        "stop_reason": "tool_use" if message.get("tool_calls") else (choice.get("finish_reason") or "end_turn"),
         "stop_sequence": None,
         "usage": {
             "input_tokens": usage.get("prompt_tokens", usage.get("input_tokens", 0)),

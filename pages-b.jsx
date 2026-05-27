@@ -2,8 +2,45 @@
 const { useState: useStateB, useMemo: useMemoB, useEffect: useEffectB } = React;
 
 // ============ Page: Claude Code Compatibility ============
-function PageClaude({ aliases, setAliases, showHaikuWarning = true }) {
+function PageClaude({ aliases, setAliases, profiles = [], showHaikuWarning = true }) {
   const haikuEnabled = aliases.some(a => a.enabled && a.alias.includes('haiku'));
+  const [editing, setEditing] = useStateB(null);
+  const [draft, setDraft] = useStateB(null);
+  const roleOptions = ['fast_tool', 'main', 'large', 'verifier', 'vision', 'fallback'];
+  const profileOptions = profiles.length ? profiles : [{ id: 'default', name: 'Default' }];
+  const startEdit = (alias) => {
+    setEditing(alias.alias || 'new');
+    setDraft({
+      alias: alias.alias || '',
+      role: alias.role || 'main',
+      profile_id: alias.profile_id || alias.targetProfile || 'default',
+      enabled: alias.enabled !== false,
+      notes: alias.notes || '',
+    });
+  };
+  const addAlias = () => startEdit({ alias: '', role: 'main', profile_id: profileOptions[0]?.id || 'default', enabled: true, notes: '' });
+  const saveAlias = async () => {
+    if (!draft?.alias || !window.SuperDSApi) return;
+    const next = await window.SuperDSApi.saveAlias(draft);
+    setAliases(next);
+    setEditing(null);
+    setDraft(null);
+  };
+  const toggleAlias = async (alias, enabled) => {
+    const optimistic = aliases.map(a => a.alias === alias.alias ? { ...a, enabled } : a);
+    setAliases(optimistic);
+    if (window.SuperDSApi) {
+      const next = await window.SuperDSApi.saveAlias({ ...alias, enabled, profile_id: alias.profile_id || alias.targetProfile });
+      setAliases(next);
+    }
+  };
+  const deleteAlias = async (alias) => {
+    if (!window.SuperDSApi) return;
+    const ok = window.confirm ? window.confirm(`删除别名「${alias.alias}」？`) : true;
+    if (!ok) return;
+    const next = await window.SuperDSApi.deleteAlias(alias.alias);
+    setAliases(next);
+  };
 
   return (
     <div className="col" style={{ gap: 14 }}>
@@ -25,7 +62,7 @@ function PageClaude({ aliases, setAliases, showHaikuWarning = true }) {
         </div>
       )}
 
-      <div className="grid" style={{ gridTemplateColumns: '1.4fr 1fr', gap: 14 }}>
+      <div className="grid claude-setup-grid">
         <div className="card">
           <div className="card-h">
             <div className="t"><Icon name="check" size={14} /> 兼容性检查</div>
@@ -65,7 +102,7 @@ function PageClaude({ aliases, setAliases, showHaikuWarning = true }) {
           <div className="t"><Icon name="route" size={14} /> 模型别名表</div>
           <div className="row" style={{ gap: 8 }}>
             <span className="muted tiny">{aliases.filter(a => a.enabled).length} / {aliases.length} 已启用</span>
-            <button className="btn sm"><Icon name="plus" size={11}/> 添加别名</button>
+            <button className="btn sm" onClick={addAlias}><Icon name="plus" size={11}/> 添加别名</button>
           </div>
         </div>
         <div className="card-b tight">
@@ -82,22 +119,46 @@ function PageClaude({ aliases, setAliases, showHaikuWarning = true }) {
               </tr>
             </thead>
             <tbody>
+              {editing === 'new' && (
+                <AliasEditRow
+                  draft={draft}
+                  setDraft={setDraft}
+                  roleOptions={roleOptions}
+                  profileOptions={profileOptions}
+                  onSave={saveAlias}
+                  onCancel={() => { setEditing(null); setDraft(null); }}
+                />
+              )}
               {aliases.map(a => {
                 const isHaiku = a.alias.includes('haiku');
+                const isEditing = editing === a.alias;
+                if (isEditing) {
+                  return (
+                    <AliasEditRow
+                      key={a.alias}
+                      draft={draft}
+                      setDraft={setDraft}
+                      roleOptions={roleOptions}
+                      profileOptions={profileOptions}
+                      onSave={saveAlias}
+                      onCancel={() => { setEditing(null); setDraft(null); }}
+                    />
+                  );
+                }
                 return (
-                  <tr key={a.id} style={{ opacity: a.enabled ? 1 : 0.55 }}>
-                    <td><Switch on={a.enabled} onChange={(v) => setAliases(aliases.map(x => x.id === a.id ? { ...x, enabled: v } : x))} /></td>
+                  <tr key={a.alias} style={{ opacity: a.enabled ? 1 : 0.55 }}>
+                    <td><Switch on={a.enabled} onChange={(v) => toggleAlias(a, v)} /></td>
                     <td>
                       <span className={`mono ${isHaiku ? 'text-accent' : ''}`} style={{ fontSize: 12, fontWeight: isHaiku ? 600 : 400 }}>{a.alias}</span>
                       {isHaiku && <span className="badge accent" style={{ marginLeft: 8 }}>HAIKU</span>}
                     </td>
                     <td><span className="badge neutral">{a.role}</span></td>
-                    <td className="mono tiny muted">{a.targetProfile}</td>
+                    <td className="mono tiny muted">{a.profile_id || a.targetProfile}</td>
                     <td className="mono" style={{ fontSize: 12 }}>{a.targetModel}</td>
                     <td className="muted tiny">{a.notes}</td>
                     <td className="row" style={{ gap: 4, justifyContent: 'flex-end' }}>
-                      <button className="btn sm ghost"><Icon name="edit" size={11}/></button>
-                      <button className="btn sm ghost danger"><Icon name="trash" size={11}/></button>
+                      <button className="btn sm ghost" onClick={() => startEdit(a)}><Icon name="edit" size={11}/></button>
+                      <button className="btn sm ghost danger" onClick={() => deleteAlias(a)}><Icon name="trash" size={11}/></button>
                     </td>
                   </tr>
                 );
@@ -110,10 +171,36 @@ function PageClaude({ aliases, setAliases, showHaikuWarning = true }) {
   );
 }
 
+function AliasEditRow({ draft, setDraft, roleOptions, profileOptions, onSave, onCancel }) {
+  const update = (key, value) => setDraft(d => ({ ...d, [key]: value }));
+  return (
+    <tr>
+      <td><Switch on={draft?.enabled !== false} onChange={(v) => update('enabled', v)} /></td>
+      <td><input className="input mono" value={draft?.alias || ''} onChange={(e) => update('alias', e.target.value)} placeholder="claude-sonnet-4-6" /></td>
+      <td>
+        <select className="select mono" value={draft?.role || 'main'} onChange={(e) => update('role', e.target.value)}>
+          {roleOptions.map(r => <option key={r} value={r}>{r}</option>)}
+        </select>
+      </td>
+      <td>
+        <select className="select mono" value={draft?.profile_id || 'default'} onChange={(e) => update('profile_id', e.target.value)}>
+          {profileOptions.map(p => <option key={p.id} value={p.id}>{p.name || p.id}</option>)}
+        </select>
+      </td>
+      <td className="muted tiny">按角色解析</td>
+      <td><input className="input" value={draft?.notes || ''} onChange={(e) => update('notes', e.target.value)} placeholder="说明" /></td>
+      <td className="row" style={{ gap: 4, justifyContent: 'flex-end' }}>
+        <button className="btn sm primary" onClick={onSave}><Icon name="check" size={11}/></button>
+        <button className="btn sm ghost" onClick={onCancel}><Icon name="x" size={11}/></button>
+      </td>
+    </tr>
+  );
+}
+
 // ============ Page: Traces ============
 function PageTraces({ initialId, traces, setTraces }) {
-  const safeTraces = traces && traces.length ? traces : window.TRACES;
-  const [selectedId, setSelectedId] = useStateB(initialId || safeTraces[0].id);
+  const safeTraces = traces || [];
+  const [selectedId, setSelectedId] = useStateB(initialId || safeTraces[0]?.id || '');
   const [tab, setTab] = useStateB('timeline');
   const [search, setSearch] = useStateB('');
   const [filterStatus, setFilterStatus] = useStateB('all');
@@ -131,6 +218,7 @@ function PageTraces({ initialId, traces, setTraces }) {
   const sel = safeTraces.find(t => t.id === selectedId) || safeTraces[0];
 
   const replay = () => {
+    if (!sel) return;
     const t = { ...sel, id: 'tr_' + Math.floor(Math.random() * 0xfffff).toString(16).padStart(5, '0'), time: window.fmtTime(new Date()), replayed: true };
     setTraces([t, ...traces]);
     setSelectedId(t.id);
@@ -190,6 +278,10 @@ function PageTraces({ initialId, traces, setTraces }) {
 
         {/* Right: detail */}
         <div className="card trace-detail">
+          {!sel ? (
+            <div className="empty" style={{ margin: 14 }}>暂无追踪详情。</div>
+          ) : (
+          <>
           <div className="card-h">
             <div className="row" style={{ gap: 12 }}>
               <div className="t"><Icon name="search" size={14}/> <span className="mono">{sel.id}</span></div>
@@ -315,6 +407,8 @@ function PageTraces({ initialId, traces, setTraces }) {
                 : <div className="empty">本次追踪没有错误。</div>
             )}
           </div>
+          </>
+          )}
         </div>
       </div>
     </div>

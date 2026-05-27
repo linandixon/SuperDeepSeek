@@ -35,7 +35,7 @@ from .provider_presets import load_provider_presets
 from .provider_router import ProviderRouter
 from .reasoning_state import extract_opaque_reasoning, validate_mimo_reasoning_history
 from .secret_redaction import redact
-from .security import configured_key, require_local_key
+from .security import configured_key, require_local_key, token_from_headers
 from .trace_store import TraceStore
 from .upstream import call_anthropic_messages, call_openai_chat, iter_openai_chat_stream, test_connection
 
@@ -108,26 +108,72 @@ def normalize_provider_payload(body: Dict[str, Any], existing: Optional[Dict[str
     api_key = body.get("api_key") or body.get("apiKey")
     if isinstance(api_key, str) and (api_key.startswith("sk-****") or api_key == "<redacted>"):
         api_key = existing.get("api_key", "")
+    default_model = body.get("default_model") or body.get("defaultModel") or existing.get("default_model", "")
+    provider_id = body.get("id") or existing.get("id") or body.get("name", "custom").lower().replace(" ", "-")
+    base_url = body.get("base_url") or body.get("baseUrl") or existing.get("base_url", "")
+    default_model = canonical_provider_model(provider_id, base_url, default_model)
+    models = normalize_provider_models(body.get("models", body.get("model_list", body.get("modelList"))), default_model, existing)
+    models = [canonical_provider_model(provider_id, base_url, model) for model in models]
+    models = list(dict.fromkeys([model for model in models if model]))
+    if not default_model and models:
+        default_model = models[0]
     return {
         **existing,
-        "id": body.get("id") or existing.get("id") or body.get("name", "custom").lower().replace(" ", "-"),
+        "id": provider_id,
         "name": body.get("name") or existing.get("name") or "Custom Provider",
         "protocol": body.get("protocol") or existing.get("protocol") or "openai",
-        "base_url": body.get("base_url") or body.get("baseUrl") or existing.get("base_url", ""),
+        "base_url": base_url,
         "api_key_env": body.get("api_key_env") or body.get("apiKeyEnv") or existing.get("api_key_env", ""),
         "api_key": api_key if api_key is not None else existing.get("api_key", ""),
-        "default_model": body.get("default_model") or body.get("defaultModel") or existing.get("default_model", ""),
+        "default_model": default_model,
+        "models": models,
     }
 
 
-def model_id_for_provider_default(provider: Dict[str, Any]) -> str:
-    raw = f"{provider.get('id', 'provider')}_{provider.get('default_model', 'model')}"
+def canonical_provider_model(provider_id: str, base_url: str, model: str) -> str:
+    model = str(model or "").strip()
+    if not model:
+        return ""
+    is_deepinfra = provider_id == "deepinfra" or "api.deepinfra.com" in (base_url or "")
+    if is_deepinfra and model.startswith("gpt-oss-"):
+        return f"openai/{model}"
+    return model
+
+
+def normalize_provider_models(raw: Any, default_model: str = "", existing: Optional[Dict[str, Any]] = None) -> list:
+    existing = existing or {}
+    if raw is None:
+        raw = existing.get("models")
+    if raw is None:
+        raw = [default_model] if default_model else []
+    if isinstance(raw, str):
+        raw = re.split(r"[\n,]+", raw)
+    out = []
+    seen = set()
+    for item in raw or []:
+        model = item.get("id") if isinstance(item, dict) else item
+        model = str(model or "").strip()
+        if not model or model in seen:
+            continue
+        seen.add(model)
+        out.append(model)
+    if default_model and default_model not in seen:
+        out.insert(0, default_model)
+    return out
+
+
+def provider_model_names(provider: Dict[str, Any]) -> list:
+    return normalize_provider_models(provider.get("models"), provider.get("default_model", ""))
+
+
+def model_id_for_provider_model(provider: Dict[str, Any], model_name: str) -> str:
+    raw = f"{provider.get('id', 'provider')}_{model_name or 'model'}"
     slug = re.sub(r"[^a-zA-Z0-9]+", "_", raw).strip("_").lower()
     return slug or "provider_model"
 
 
-def litellm_model_for_provider(provider: Dict[str, Any]) -> str:
-    model = provider.get("default_model", "")
+def litellm_model_for_provider(provider: Dict[str, Any], model: str = "") -> str:
+    model = model or provider.get("default_model", "")
     if provider.get("protocol") == "openai":
         return f"openai/{model}" if model and "/" not in model.split(":", 1)[0] else model
     return model
@@ -135,15 +181,55 @@ def litellm_model_for_provider(provider: Dict[str, Any]) -> str:
 
 def ensure_provider_default_models(config: Dict[str, Any]) -> bool:
     changed = False
+    for provider in config.get("providers", []):
+        provider_id = provider.get("id")
+        provider_models = provider_model_names(provider)
+        if provider_models != provider.get("models", []):
+            provider["models"] = provider_models
+            changed = True
+        if not provider_id or not provider_models:
+            continue
+        changed = sync_provider_models(config, provider) or changed
+    return changed
+
+
+def sync_provider_models(config: Dict[str, Any], provider: Dict[str, Any]) -> bool:
+    changed = False
     models = config.setdefault("models", [])
+    provider_id = provider.get("id")
+    managed_sources = {"provider_default", "provider_model"}
+    desired = provider_model_names(provider)
+    desired_set = set(desired)
+    existing_by_actual = {
+        m.get("actual_model"): m
+        for m in models
+        if m.get("provider_id") == provider_id and m.get("source") in managed_sources
+    }
+
+    before = len(models)
+    models[:] = [
+        m
+        for m in models
+        if not (
+            m.get("provider_id") == provider_id
+            and m.get("source") in managed_sources
+            and m.get("actual_model") not in desired_set
+        )
+    ]
+    changed = changed or len(models) != before
+
     existing_pairs = {(m.get("provider_id"), m.get("actual_model")) for m in models}
     existing_ids = {m.get("id") for m in models}
-    for provider in config.get("providers", []):
-        default_model = provider.get("default_model")
-        provider_id = provider.get("id")
-        if not provider_id or not default_model or (provider_id, default_model) in existing_pairs:
+    for model_name in desired:
+        if (provider_id, model_name) in existing_pairs:
+            existing = existing_by_actual.get(model_name)
+            if existing:
+                litellm_model = litellm_model_for_provider(provider, model_name)
+                if existing.get("litellm_model") != litellm_model:
+                    existing["litellm_model"] = litellm_model
+                    changed = True
             continue
-        model_id = model_id_for_provider_default(provider)
+        model_id = model_id_for_provider_model(provider, model_name)
         suffix = 2
         while model_id in existing_ids:
             model_id = f"{model_id}_{suffix}"
@@ -154,14 +240,14 @@ def ensure_provider_default_models(config: Dict[str, Any]) -> bool:
             {
                 "id": model_id,
                 "provider_id": provider_id,
-                "litellm_model": litellm_model_for_provider(provider),
-                "actual_model": default_model,
+                "litellm_model": litellm_model_for_provider(provider, model_name),
+                "actual_model": model_name,
                 "role": "main",
                 "capabilities": caps,
-                "source": "provider_default",
+                "source": "provider_model",
             }
         )
-        existing_pairs.add((provider_id, default_model))
+        existing_pairs.add((provider_id, model_name))
         existing_ids.add(model_id)
         changed = True
     return changed
@@ -210,6 +296,40 @@ PROFILE_MODEL_KEYS = {
     "vision": "vision_model",
     "fallback": "fallback_model",
 }
+
+
+def normalize_alias_payload(body: Dict[str, Any], existing: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    existing = existing or {}
+    alias = body.get("alias") or existing.get("alias", "")
+    profile_id = body.get("profile_id") or body.get("profileId") or body.get("targetProfile") or existing.get("profile_id", "default")
+    role = body.get("role") or existing.get("role", "main")
+    return {
+        **existing,
+        "alias": alias,
+        "profile_id": profile_id,
+        "role": role,
+        "enabled": body.get("enabled") if isinstance(body.get("enabled"), bool) else existing.get("enabled", True),
+        "notes": body.get("notes") or existing.get("notes", ""),
+    }
+
+
+def alias_response(alias: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
+    profile_id = alias.get("profile_id", "default")
+    role = alias.get("role", "main")
+    profile = profile_for_id(config, profile_id)
+    model_id = profile.get(PROFILE_MODEL_KEYS.get(role, "main_model")) or profile.get("main_model")
+    model = next((m for m in config.get("models", []) if m.get("id") == model_id), {})
+    return {
+        "id": alias.get("alias"),
+        "alias": alias.get("alias", ""),
+        "role": role,
+        "profile_id": profile_id,
+        "targetProfile": profile_id,
+        "target_model_id": model_id or "",
+        "targetModel": model.get("actual_model", model_id or ""),
+        "enabled": alias.get("enabled", True),
+        "notes": alias.get("notes", ""),
+    }
 
 
 def normalize_profile_payload(body: Dict[str, Any], existing: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -611,13 +731,8 @@ def websocket_is_authorized(websocket: WebSocket) -> bool:
     expected = configured_key(websocket.app.state.config_store.get())
     if not expected:
         return True
-    authorization = websocket.headers.get("authorization", "")
-    token = ""
-    if authorization.lower().startswith("bearer "):
-        token = authorization.split(" ", 1)[1].strip()
-    elif websocket.headers.get("x-api-key"):
-        token = websocket.headers.get("x-api-key", "").strip()
-    elif websocket.query_params.get("api_key"):
+    token = token_from_headers(websocket.headers)
+    if not token and websocket.query_params.get("api_key"):
         token = websocket.query_params.get("api_key", "").strip()
     return token == expected
 
@@ -785,7 +900,38 @@ def install_routes(app: FastAPI) -> None:
 
     @app.get("/api/aliases")
     async def aliases(request: Request):
-        return {"data": cfg(request).get("model_aliases", [])}
+        config = cfg(request)
+        return {"data": [alias_response(a, config) for a in config.get("model_aliases", [])]}
+
+    @app.post("/api/aliases")
+    async def save_alias(request: Request):
+        body = await request.json()
+        config = cfg(request)
+        existing = next((a for a in config.get("model_aliases", []) if a.get("alias") == body.get("alias")), None)
+        alias = normalize_alias_payload(body, existing)
+        if not alias.get("alias"):
+            raise HTTPException(status_code=400, detail="alias_required")
+        if alias.get("role") not in PROFILE_MODEL_KEYS:
+            raise HTTPException(status_code=400, detail="unknown_role")
+        if not any(p.get("id") == alias.get("profile_id") for p in config.get("profiles", [])):
+            raise HTTPException(status_code=400, detail="unknown_profile")
+        aliases = [a for a in config.get("model_aliases", []) if a.get("alias") != alias["alias"]]
+        aliases.append(alias)
+        config["model_aliases"] = aliases
+        saved = request.app.state.config_store.save(config)
+        request.app.state.provider_router = ProviderRouter(saved)
+        return {"ok": True, "alias": alias_response(alias, saved), "data": [alias_response(a, saved) for a in saved.get("model_aliases", [])]}
+
+    @app.delete("/api/aliases/{alias_name}")
+    async def delete_alias(request: Request, alias_name: str):
+        config = cfg(request)
+        before = len(config.get("model_aliases", []))
+        config["model_aliases"] = [a for a in config.get("model_aliases", []) if a.get("alias") != alias_name]
+        if len(config["model_aliases"]) == before:
+            raise HTTPException(status_code=404, detail="alias_not_found")
+        saved = request.app.state.config_store.save(config)
+        request.app.state.provider_router = ProviderRouter(saved)
+        return {"ok": True, "alias": alias_name, "data": [alias_response(a, saved) for a in saved.get("model_aliases", [])]}
 
     @app.post("/api/test-connection")
     async def test_provider(request: Request):
@@ -1374,23 +1520,73 @@ async def stream_openai_passthrough(request: Request, payload: dict, resolved, t
 
 async def stream_openai_as_anthropic(request: Request, payload: dict, resolved, incoming_model: str, trace_id: str, trace_record: dict):
     text_parts = []
+    tool_calls = {}
     error = None
     message_id = "msg_" + uuid.uuid4().hex[:16]
+    text_block_started = False
+    text_block_index = None
+    next_block_index = 0
     yield "event: message_start\ndata: " + json.dumps({"message": {"id": message_id, "type": "message", "role": "assistant", "model": incoming_model, "content": [], "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": 0, "output_tokens": 0}}}, ensure_ascii=False) + "\n\n"
-    yield 'event: content_block_start\ndata: {"index":0,"content_block":{"type":"text","text":""}}\n\n'
     try:
         async for data in iter_openai_chat_stream(payload, resolved):
-            text, finish = openai_stream_delta(data)
+            text, tool_deltas, _reasoning_text, finish = openai_stream_parts(data)
             if text:
+                if not text_block_started:
+                    text_block_started = True
+                    text_block_index = next_block_index
+                    yield "event: content_block_start\ndata: " + json.dumps({"index": text_block_index, "content_block": {"type": "text", "text": ""}}, ensure_ascii=False) + "\n\n"
+                    next_block_index += 1
                 text_parts.append(text)
-                yield "event: content_block_delta\ndata: " + json.dumps({"index": 0, "delta": {"type": "text_delta", "text": text}}, ensure_ascii=False) + "\n\n"
+                yield "event: content_block_delta\ndata: " + json.dumps({"index": text_block_index, "delta": {"type": "text_delta", "text": text}}, ensure_ascii=False) + "\n\n"
+            for delta_call in tool_deltas:
+                index = int(delta_call.get("index", len(tool_calls)))
+                state = tool_calls.setdefault(
+                    index,
+                    {
+                        "id": delta_call.get("id") or "call_" + uuid.uuid4().hex[:12],
+                        "name": "",
+                        "arguments": "",
+                        "block_index": None,
+                    },
+                )
+                if delta_call.get("id"):
+                    state["id"] = delta_call["id"]
+                function = delta_call.get("function") or {}
+                if function.get("name"):
+                    state["name"] = function["name"]
+                if state["block_index"] is None and state["name"]:
+                    state["block_index"] = next_block_index
+                    next_block_index += 1
+                    yield "event: content_block_start\ndata: " + json.dumps(
+                        {
+                            "index": state["block_index"],
+                            "content_block": {"type": "tool_use", "id": state["id"], "name": state["name"], "input": {}},
+                        },
+                        ensure_ascii=False,
+                    ) + "\n\n"
+                if function.get("arguments"):
+                    state["arguments"] += function["arguments"]
+                    if state["block_index"] is not None:
+                        yield "event: content_block_delta\ndata: " + json.dumps(
+                            {
+                                "index": state["block_index"],
+                                "delta": {"type": "input_json_delta", "partial_json": function["arguments"]},
+                            },
+                            ensure_ascii=False,
+                        ) + "\n\n"
             if data == "[DONE]" or finish:
                 break
     except Exception as exc:
         error = exc
         yield "event: error\ndata: " + json.dumps({"type": "error", "error": {"type": exc.__class__.__name__, "message": str(exc) or repr(exc)}}, ensure_ascii=False) + "\n\n"
-    yield 'event: content_block_stop\ndata: {"index":0}\n\n'
-    yield "event: message_delta\ndata: " + json.dumps({"delta": {"stop_reason": "stop" if not error else "error", "stop_sequence": None}, "usage": {"output_tokens": 0}}, ensure_ascii=False) + "\n\n"
+    if text_block_started:
+        yield "event: content_block_stop\ndata: " + json.dumps({"index": text_block_index}, ensure_ascii=False) + "\n\n"
+    for index in sorted(tool_calls):
+        block_index = tool_calls[index].get("block_index")
+        if block_index is not None:
+            yield "event: content_block_stop\ndata: " + json.dumps({"index": block_index}, ensure_ascii=False) + "\n\n"
+    stop_reason = "error" if error else ("tool_use" if tool_calls else "stop")
+    yield "event: message_delta\ndata: " + json.dumps({"delta": {"stop_reason": stop_reason, "stop_sequence": None}, "usage": {"output_tokens": 0}}, ensure_ascii=False) + "\n\n"
     yield 'event: message_stop\ndata: {}\n\n'
     latency_ms = int((time.perf_counter() - trace_record["start"]) * 1000)
     if error:
