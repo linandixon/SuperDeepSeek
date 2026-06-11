@@ -40,7 +40,10 @@
         "tools": true,
         "reasoning_state": "reasoning_content",
         "api_format": "openai_chat"
-      }
+      },
+      "models": [
+        "deepseek-v4-pro"
+      ]
     },
     {
       "id": "openrouter",
@@ -55,7 +58,10 @@
         "tools": true,
         "reasoning_state": "anthropic_thinking",
         "api_format": "openai_chat"
-      }
+      },
+      "models": [
+        "anthropic/claude-haiku-4.5"
+      ]
     },
     {
       "id": "mimo",
@@ -66,11 +72,14 @@
       "api_key": "",
       "default_model": "mimo-v2.5",
       "capabilities": {
-        "vision": false,
+        "vision": true,
         "tools": true,
         "reasoning_state": "mimo_reasoning_content",
         "api_format": "openai_chat"
-      }
+      },
+      "models": [
+        "mimo-v2.5"
+      ]
     },
     {
       "id": "siliconflow",
@@ -79,7 +88,10 @@
       "base_url": "https://api.siliconflow.cn/v1",
       "api_key_env": "SILICONFLOW_API_KEY",
       "api_key": "",
-      "default_model": "Qwen/Qwen3.6-27B"
+      "default_model": "Qwen/Qwen3.6-27B",
+      "models": [
+        "Qwen/Qwen3.6-27B"
+      ]
     },
     {
       "id": "kimi",
@@ -94,7 +106,10 @@
         "tools": true,
         "reasoning_state": "none",
         "api_format": "openai_chat"
-      }
+      },
+      "models": [
+        "kimi-k2.6"
+      ]
     }
   ],
   "models": [
@@ -185,7 +200,7 @@
       "actual_model": "mimo-v2.5",
       "role": "main",
       "capabilities": {
-        "vision": false,
+        "vision": true,
         "tools": true,
         "reasoning_state": "mimo_reasoning_content",
         "api_format": "openai_chat"
@@ -240,7 +255,7 @@
         ],
         "default": []
       },
-      "vision_model": "siliconflow_qwen_qwen3_6_27b",
+      "vision_model": "mimo_mimo_v2_5",
       "fallback_model": "openrouter_anthropic_claude_haiku_4_5"
     }
   ],
