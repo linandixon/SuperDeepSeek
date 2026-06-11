@@ -675,15 +675,30 @@ async def prepare_multimodal_context(request: Request, protocol: str, body: dict
     historical_evidence = []
     forced_role = None
     key = session_key(request, body)
+    cached_packets = []
+    new_images = []
 
     if images and vision_model_id(config, resolved.profile_id):
-        observation_text, vision_resolved, vision_attempts = await run_vision_worker(request, payload, resolved.incoming_model)
-        if not observation_text.strip():
-            observation_text = "视觉副手未返回可用观察；不能可靠回答图片细节。"
-        evidence_packets = make_evidence_packets(images, key, note=f"vision_worker:{vision_resolved.provider_id}/{vision_resolved.actual_model}", observation_text=observation_text)
-        request.app.state.evidence_store.put_many(evidence_packets)
+        # ---- 按图片内容 hash 查缓存，避免重复调用视觉模型 ----
+        image_hashes = [img.get("hash") for img in images]
+        cached_map = request.app.state.evidence_store.get_by_hashes(key, image_hashes)
+        new_images = [img for img in images if img.get("hash") not in cached_map]
+        # 按原始顺序收集缓存命中的 evidence packets，保证注入文本稳定
+        cached_packets = [cached_map[h] for h in image_hashes if h in cached_map]
+
+        if new_images:
+            observation_text, vision_resolved, vision_attempts = await run_vision_worker(request, payload, resolved.incoming_model)
+            if not observation_text.strip():
+                observation_text = "视觉副手未返回可用观察；不能可靠回答图片细节。"
+            new_packets = make_evidence_packets(new_images, key, note=f"vision_worker:{vision_resolved.provider_id}/{vision_resolved.actual_model}", observation_text=observation_text)
+            request.app.state.evidence_store.put_many(new_packets)
+            evidence_packets = cached_packets + new_packets
+            steps.append(step("Vision Worker", "worker", summary=f"{vision_resolved.provider_name} / {vision_resolved.actual_model} produced evidence for {len(new_images)} new image(s), {len(cached_packets)} cached"))
+        else:
+            evidence_packets = cached_packets
+            steps.append(step("Vision Cache Hit", "worker", summary=f"All {len(cached_packets)} image(s) resolved from evidence cache, vision worker skipped"))
+
         payload = inject_evidence_into_chat_payload(payload, evidence_system_message(evidence_packets))
-        steps.append(step("Vision Worker", "worker", summary=f"{vision_resolved.provider_name} / {vision_resolved.actual_model} produced evidence"))
     elif images and not caps.get("vision"):
         image_policy = config.get("runtime", {}).get("image_policy", "ocr")
         if image_policy == "reject":
@@ -718,7 +733,13 @@ async def prepare_multimodal_context(request: Request, protocol: str, body: dict
             "route_attempts": locals().get("vision_attempts", []),
             "observation_chars": len(locals().get("observation_text", "")),
         },
+        "vision_cache": {
+            "cached_count": len(cached_packets),
+            "new_count": len(new_images),
+            "skipped_worker": bool(images) and not new_images,
+        },
     }
+
 
 
 class ConnectionRequest:

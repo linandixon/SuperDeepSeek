@@ -121,10 +121,12 @@ async def iter_openai_chat_stream(payload: Dict[str, Any], resolved, timeout=DEF
                 raise httpx.HTTPStatusError(error_body, request=response.request, response=response)
             async for line in response.aiter_lines():
                 line = line.strip()
-                if not line:
+                if not line or line.startswith(":"):
                     continue
                 if line.startswith("data:"):
                     line = line[5:].strip()
+                if not line or line.startswith(":"):
+                    continue
                 yield line
 
 
