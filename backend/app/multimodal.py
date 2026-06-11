@@ -61,6 +61,24 @@ def latest_user_text(protocol: str, body: Dict[str, Any]) -> str:
     return ""
 
 
+def conversation_fingerprint(body: Dict[str, Any]) -> str:
+    """首条用户消息的内容指纹，给没有任何会话标识的客户端近似区分会话用。
+
+    agentic 客户端每轮都重发完整历史，所以首条用户消息在同一会话内稳定、跨会话不同。
+    """
+    messages = body.get("messages")
+    for msg in messages if isinstance(messages, list) else []:
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            return "conv_" + _hash_text(json.dumps(msg.get("content"), ensure_ascii=False, sort_keys=True, default=str))
+    inp = body.get("input")
+    if isinstance(inp, str) and inp.strip():
+        return "conv_" + _hash_text(inp)
+    for item in inp if isinstance(inp, list) else []:
+        if isinstance(item, dict) and item.get("role", "user") == "user" and item.get("type") in (None, "message"):
+            return "conv_" + _hash_text(json.dumps(item.get("content"), ensure_ascii=False, sort_keys=True, default=str))
+    return ""
+
+
 def references_previous_image(text: str) -> bool:
     return any(word in text for word in IMAGE_REF_WORDS)
 
