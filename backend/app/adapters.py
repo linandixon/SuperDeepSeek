@@ -45,7 +45,7 @@ def content_to_text(content: Any) -> str:
             elif block.get("type") == "text":
                 parts.append(block.get("text", ""))
             elif block.get("type") == "image":
-                parts.append("[image]")
+                parts.append("[image omitted; see vision evidence packet]")
             elif block.get("type") == "tool_result":
                 parts.append(str(block.get("content", "")))
         return "\n".join([p for p in parts if p])

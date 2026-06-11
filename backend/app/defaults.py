@@ -22,6 +22,11 @@ def default_config() -> dict:
             "default_profile": "default",
             "trace_retention_days": 7,
             "image_policy": "ocr",
+            "evidence_retention_days": 14,
+            "vision_worker": {
+                "max_tokens": 2048,
+                "timeout_seconds": 90,
+            },
             "circuit_breaker": {
                 "failure_threshold": 3,
                 "success_threshold": 2,

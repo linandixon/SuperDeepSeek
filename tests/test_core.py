@@ -1,5 +1,9 @@
 import unittest
 import asyncio
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 from backend.app.adapters import anthropic_payload, anthropic_to_openai_payload, openai_to_anthropic_response, responses_tools_to_openai
 from backend.app.alias_resolver import AliasResolver
@@ -7,8 +11,9 @@ from backend.app.billing_header_sanitizer import sanitize_system_first_line
 from backend.app.circuit_breaker import CircuitBreaker, CircuitBreakerConfig
 from backend.app.capabilities import model_capabilities
 from backend.app.defaults import default_config
-from backend.app.main import canonical_provider_model, ensure_provider_default_models, normalize_profile_payload, normalize_provider_payload, openai_to_responses_response, remove_provider_from_config, responses_body_with_cached_context
-from backend.app.multimodal import detect_images, inject_evidence_into_chat_payload, make_evidence_packets, responses_input_to_messages
+from backend.app.evidence_store import EvidenceStore
+from backend.app.main import canonical_provider_model, ensure_provider_default_models, normalize_profile_payload, normalize_provider_payload, openai_to_responses_response, prepare_multimodal_context, remove_provider_from_config, responses_body_with_cached_context
+from backend.app.multimodal import detect_images, inject_evidence_into_chat_payload, make_evidence_packets, responses_input_to_messages, vision_request_content
 from backend.app.provider_presets import load_provider_presets
 from backend.app.provider_router import ProviderRouter
 from backend.app.reasoning_state import extract_opaque_reasoning, validate_mimo_reasoning_history
@@ -394,7 +399,7 @@ class ProviderRouterTests(unittest.TestCase):
         calls = []
         original = router_module.call_openai_chat
 
-        async def fake_call(payload, resolved):
+        async def fake_call(payload, resolved, **kwargs):
             calls.append(resolved.provider_id)
             if len(calls) == 1:
                 raise RuntimeError("primary failed")
@@ -560,6 +565,133 @@ class ResponsesAdapterTests(unittest.TestCase):
         self.assertEqual(len(messages[0]["tool_calls"]), 2)
         self.assertEqual(messages[1]["tool_call_id"], "call_1")
         self.assertEqual(messages[2]["tool_call_id"], "call_2")
+
+
+class _FakeConfigStore:
+    def __init__(self, config):
+        self._config = config
+
+    def get(self):
+        return self._config
+
+
+def _vision_test_setup(tmpdir):
+    config = default_config()
+    for provider in config["providers"]:
+        provider["api_key"] = ""  # 强制 mock 上游，测试不打真实网络
+    evidence_store = EvidenceStore(Path(tmpdir) / "evidence.sqlite3")
+    state = SimpleNamespace(
+        config_store=_FakeConfigStore(config),
+        evidence_store=evidence_store,
+        provider_router=ProviderRouter(config),
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=state), headers={})
+    return config, evidence_store, request
+
+
+def _image_body(data="abc", text="看图说话"):
+    return {
+        "metadata": {"session_id": "sess-test"},
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": text},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": data}},
+                ],
+            }
+        ],
+    }
+
+
+class VisionSidekickTests(unittest.TestCase):
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.config, self.evidence_store, self.request = _vision_test_setup(self._tmpdir.name)
+        self.resolver = AliasResolver(self.config)
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _prepare(self, body, resolved=None):
+        resolved = resolved or self.resolver.resolve("claude-sonnet-4-5")
+        payload, _ = anthropic_to_openai_payload(body, {}, resolved, "strip_for_non_anthropic_upstream")
+        steps = []
+        out_payload, forced_role, mm = asyncio.run(
+            prepare_multimodal_context(self.request, "anthropic", body, payload, resolved, steps)
+        )
+        return out_payload, forced_role, mm, steps
+
+    def test_detects_images_inside_tool_result(self):
+        body = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_1",
+                            "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "xyz"}}],
+                        }
+                    ],
+                }
+            ]
+        }
+        images = detect_images("anthropic", body)
+        self.assertEqual(len(images), 1)
+        self.assertEqual(images[0]["source_ref"], "messages[0].content[0].content[0]")
+
+    def test_vision_request_content_uses_only_given_images(self):
+        images = detect_images("anthropic", _image_body(data="abc"))
+        content = vision_request_content(images, "右上角是什么？")
+        image_blocks = [b for b in content if b.get("type") == "image_url"]
+        self.assertEqual(len(image_blocks), 1)
+        self.assertTrue(image_blocks[0]["image_url"]["url"].startswith("data:image/png;base64,abc"))
+        self.assertTrue(any("右上角是什么" in b.get("text", "") for b in content))
+
+    def test_sidekick_injects_evidence_and_strips_images(self):
+        out_payload, forced_role, mm, steps = self._prepare(_image_body())
+        self.assertIsNone(forced_role)
+        self.assertEqual(mm["vision_cache"]["new_count"], 1)
+        system_texts = [m["content"] for m in out_payload["messages"] if m["role"] == "system"]
+        self.assertTrue(any("视觉证据包" in t for t in system_texts))
+        for msg in out_payload["messages"]:
+            self.assertNotIsInstance(msg["content"], list)
+
+    def test_sidekick_cache_hit_skips_worker(self):
+        self._prepare(_image_body())
+        _, _, mm, steps = self._prepare(_image_body())
+        self.assertTrue(mm["vision_cache"]["skipped_worker"])
+        self.assertEqual(mm["vision_cache"]["cached_count"], 1)
+        self.assertTrue(any(s["name"] == "Vision Cache Hit" for s in steps))
+
+    def test_vision_capable_model_passthrough(self):
+        resolved = self.resolver.resolve_model_id("x", "default", "vision", "qwen_vision")
+        out_payload, forced_role, mm, steps = self._prepare(_image_body(), resolved=resolved)
+        self.assertEqual(mm["evidence_packets"], [])
+        self.assertTrue(any(s["name"] == "Image Capability" for s in steps))
+        user_contents = [m["content"] for m in out_payload["messages"] if m["role"] == "user"]
+        self.assertTrue(any(isinstance(c, list) for c in user_contents))
+
+    def test_worker_failure_degrades_without_breaking_request(self):
+        async def _boom(*args, **kwargs):
+            raise RuntimeError("vision upstream down")
+
+        with mock.patch("backend.app.main.run_vision_worker", new=_boom):
+            out_payload, _, mm, steps = self._prepare(_image_body(data="failcase"))
+        self.assertEqual(mm["vision_worker"]["failed_images"], 1)
+        system_texts = [m["content"] for m in out_payload["messages"] if m["role"] == "system"]
+        self.assertTrue(any("视觉副手暂时不可用" in t for t in system_texts))
+        # 失败结果不能写入缓存，下次请求要重试视觉副手
+        images = detect_images("anthropic", _image_body(data="failcase"))
+        self.assertEqual(self.evidence_store.get_by_hashes("sess-test", [images[0]["hash"]]), {})
+
+    def test_evidence_store_prunes_old_rows(self):
+        packet = make_evidence_packets(detect_images("anthropic", _image_body()), "sess-test", observation_text="老观察")[0]
+        packet["created_at"] = 1
+        self.evidence_store.put_many([packet])
+        self.evidence_store.prune()
+        self.assertEqual(self.evidence_store.recent("sess-test"), [])
 
 
 if __name__ == "__main__":

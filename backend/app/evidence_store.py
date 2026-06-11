@@ -1,5 +1,7 @@
 import json
 import sqlite3
+import time
+from contextlib import closing
 from pathlib import Path
 from typing import Dict, List
 
@@ -9,16 +11,18 @@ DB_PATH = ROOT / "data" / "evidence.sqlite3"
 
 
 class EvidenceStore:
-    def __init__(self, path: Path = DB_PATH):
+    def __init__(self, path: Path = DB_PATH, retention_days: int = 14):
         self.path = path
+        self.retention_days = retention_days
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._init()
+        self.prune()
 
     def _connect(self):
         return sqlite3.connect(self.path)
 
     def _init(self) -> None:
-        with self._connect() as db:
+        with closing(self._connect()) as db, db:
             db.execute(
                 """
                 create table if not exists evidence (
@@ -35,8 +39,15 @@ class EvidenceStore:
                 pass
             db.execute("create index if not exists idx_evidence_session_hash on evidence(session_key, source_hash)")
 
+    def prune(self) -> None:
+        if not self.retention_days:
+            return
+        cutoff = int(time.time()) - self.retention_days * 86400
+        with closing(self._connect()) as db, db:
+            db.execute("delete from evidence where created_at < ?", (cutoff,))
+
     def put_many(self, packets: List[dict]) -> None:
-        with self._connect() as db:
+        with closing(self._connect()) as db, db:
             for packet in packets:
                 db.execute(
                     "insert or replace into evidence (id, session_key, created_at, packet_json, source_hash) values (?, ?, ?, ?, ?)",
@@ -53,7 +64,7 @@ class EvidenceStore:
         """Return {source_hash: evidence_packet} for images already analyzed in this session."""
         if not source_hashes:
             return {}
-        with self._connect() as db:
+        with closing(self._connect()) as db:
             placeholders = ",".join("?" for _ in source_hashes)
             rows = db.execute(
                 f"select source_hash, packet_json from evidence where session_key = ? and source_hash in ({placeholders}) order by created_at desc",
@@ -66,7 +77,7 @@ class EvidenceStore:
         return result
 
     def recent(self, session_key: str, limit: int = 5) -> List[dict]:
-        with self._connect() as db:
+        with closing(self._connect()) as db:
             rows = db.execute(
                 "select packet_json from evidence where session_key = ? order by created_at desc limit ?",
                 (session_key, limit),

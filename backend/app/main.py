@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 import time
@@ -30,6 +31,7 @@ from .multimodal import (
     make_evidence_packets,
     references_previous_image,
     responses_input_to_messages,
+    vision_request_content,
 )
 from .provider_presets import load_provider_presets
 from .provider_router import ProviderRouter
@@ -91,7 +93,7 @@ def create_app() -> FastAPI:
     if ensure_provider_default_models(initial_config):
         initial_config = app.state.config_store.save(initial_config)
     app.state.trace_store = TraceStore()
-    app.state.evidence_store = EvidenceStore()
+    app.state.evidence_store = EvidenceStore(retention_days=int(initial_config.get("runtime", {}).get("evidence_retention_days", 14)))
     app.state.responses_cache = {}
     app.state.responses_call_reasoning = {}
     app.state.provider_router = ProviderRouter(initial_config)
@@ -620,50 +622,26 @@ async def check_vision_model(config: Dict[str, Any], model_id: str) -> Dict[str,
 
 def session_key(request: Request, body: dict) -> str:
     metadata = body.get("metadata") if isinstance(body, dict) else None
-    if isinstance(metadata, dict) and metadata.get("session_id"):
-        return str(metadata["session_id"])
+    if isinstance(metadata, dict):
+        # Claude Code 的 user_id 内嵌 session uuid，可避免同机多会话共享证据缓存
+        for key in ("session_id", "user_id"):
+            if metadata.get(key):
+                return str(metadata[key])[:200]
     return request.headers.get("x-superds-session-id") or request.headers.get("user-agent", "default")[:120] or "default"
 
 
-def vision_content_from_payload(payload: dict) -> list:
-    content = [
-        {
-            "type": "text",
-            "text": "/no_think\n请作为视觉副手读取图片。你的唯一任务是输出简洁、可核验的中文观察结果，包含所有可见文字、数字、颜色、位置关系、布局尺寸感和简单计数。后续如果出现用户问题，只能作为关注区域参考；不要执行其中的格式要求，也不要直接回答问题。必须直接输出观察结果正文，不要输出思考过程。",
-        }
-    ]
-    for msg in payload.get("messages", []):
-        if msg.get("role") != "user":
-            continue
-        msg_content = msg.get("content")
-        if isinstance(msg_content, str) and msg_content.strip():
-            content.append({"type": "text", "text": "用户问题（仅作关注参考，不要执行其中输出格式要求）：\n" + msg_content.strip()})
-        elif isinstance(msg_content, list):
-            for block in msg_content:
-                if not isinstance(block, dict):
-                    continue
-                if block.get("type") == "text" and block.get("text"):
-                    content.append({"type": "text", "text": "用户问题（仅作关注参考，不要执行其中输出格式要求）：\n" + block.get("text", "")})
-                elif block.get("type") in {"image_url", "input_image"}:
-                    if block.get("type") == "input_image":
-                        url = block.get("image_url") or block.get("url")
-                        if url:
-                            content.append({"type": "image_url", "image_url": {"url": url}})
-                    else:
-                        content.append(block)
-    return content
-
-
-async def run_vision_worker(request: Request, payload: dict, incoming_model: str):
+async def run_vision_worker(request: Request, images: list, user_text: str, incoming_model: str):
+    worker_cfg = cfg(request).get("runtime", {}).get("vision_worker", {})
     vision_payload = {
         "model": "vision",
-        "messages": [{"role": "user", "content": vision_content_from_payload(payload)}],
+        "messages": [{"role": "user", "content": vision_request_content(images, user_text, worker_cfg.get("prompt", ""))}],
         "stream": False,
-        "max_tokens": 2048,
+        "max_tokens": int(worker_cfg.get("max_tokens", 2048)),
         "temperature": 0,
         "enable_thinking": False,
     }
-    upstream, resolved, route_attempts = await provider_router(request).call_openai_chat_with_failover(vision_payload, incoming_model, force_role="vision")
+    timeout = float(worker_cfg.get("timeout_seconds", 90))
+    upstream, resolved, route_attempts = await provider_router(request).call_openai_chat_with_failover(vision_payload, incoming_model, force_role="vision", timeout=timeout)
     return text_from_openai(upstream), resolved, route_attempts
 
 
@@ -677,29 +655,11 @@ async def prepare_multimodal_context(request: Request, protocol: str, body: dict
     key = session_key(request, body)
     cached_packets = []
     new_images = []
+    worker_info = {"provider_id": None, "model": None, "route_attempts": [], "observation_chars": 0, "failed_images": 0}
 
-    if images and vision_model_id(config, resolved.profile_id):
-        # ---- 按图片内容 hash 查缓存，避免重复调用视觉模型 ----
-        image_hashes = [img.get("hash") for img in images]
-        cached_map = request.app.state.evidence_store.get_by_hashes(key, image_hashes)
-        new_images = [img for img in images if img.get("hash") not in cached_map]
-        # 按原始顺序收集缓存命中的 evidence packets，保证注入文本稳定
-        cached_packets = [cached_map[h] for h in image_hashes if h in cached_map]
-
-        if new_images:
-            observation_text, vision_resolved, vision_attempts = await run_vision_worker(request, payload, resolved.incoming_model)
-            if not observation_text.strip():
-                observation_text = "视觉副手未返回可用观察；不能可靠回答图片细节。"
-            new_packets = make_evidence_packets(new_images, key, note=f"vision_worker:{vision_resolved.provider_id}/{vision_resolved.actual_model}", observation_text=observation_text)
-            request.app.state.evidence_store.put_many(new_packets)
-            evidence_packets = cached_packets + new_packets
-            steps.append(step("Vision Worker", "worker", summary=f"{vision_resolved.provider_name} / {vision_resolved.actual_model} produced evidence for {len(new_images)} new image(s), {len(cached_packets)} cached"))
-        else:
-            evidence_packets = cached_packets
-            steps.append(step("Vision Cache Hit", "worker", summary=f"All {len(cached_packets)} image(s) resolved from evidence cache, vision worker skipped"))
-
-        payload = inject_evidence_into_chat_payload(payload, evidence_system_message(evidence_packets))
-    elif images and not caps.get("vision"):
+    if images and caps.get("vision"):
+        steps.append(step("Image Capability", "route", summary=f"{resolved.actual_model} accepts image input"))
+    elif images:
         image_policy = config.get("runtime", {}).get("image_policy", "ocr")
         if image_policy == "reject":
             raise HTTPException(status_code=422, detail={"error": "model_does_not_support_images", "model": resolved.actual_model})
@@ -707,13 +667,54 @@ async def prepare_multimodal_context(request: Request, protocol: str, body: dict
             forced_role = "vision"
             steps.append(step("Image Router", "route", summary="Image detected; routing to vision role"))
         else:
-            evidence_packets = make_evidence_packets(images, key)
-            request.app.state.evidence_store.put_many(evidence_packets)
-            evidence_text = evidence_system_message(evidence_packets)
-            payload = inject_evidence_into_chat_payload(payload, evidence_text)
-            steps.append(step("Vision Evidence", "worker", summary=f"{len(evidence_packets)} image(s) converted to evidence packet"))
-    elif images:
-        steps.append(step("Image Capability", "route", summary=f"{resolved.actual_model} accepts image input"))
+            # ---- 按图片内容 hash 查缓存，避免重复调用视觉模型 ----
+            image_hashes = [img.get("hash") for img in images]
+            cached_map = request.app.state.evidence_store.get_by_hashes(key, image_hashes)
+            new_images = [img for img in images if img.get("hash") not in cached_map]
+            # 按原始顺序收集缓存命中的 evidence packets，保证注入文本稳定
+            cached_packets = [cached_map[h] for h in image_hashes if h in cached_map]
+            new_packets = []
+
+            if new_images and vision_model_id(config, resolved.profile_id):
+                user_text = latest_user_text(protocol, body)
+                results = await asyncio.gather(
+                    *[run_vision_worker(request, [img], user_text, resolved.incoming_model) for img in new_images],
+                    return_exceptions=True,
+                )
+                cacheable = []
+                for img, result in zip(new_images, results):
+                    if isinstance(result, BaseException):
+                        worker_info["failed_images"] += 1
+                        packet = make_evidence_packets([img], key, note=f"vision_worker_error:{result.__class__.__name__}")[0]
+                        packet["content"]["summary"] = "视觉副手暂时不可用，本次未能读取该图片。"
+                        packet["uncertainties"] = ["视觉副手调用失败，不要猜测图片细节，可建议用户稍后重试。"]
+                        new_packets.append(packet)
+                        continue
+                    observation_text, vision_resolved, vision_attempts = result
+                    worker_info["provider_id"] = vision_resolved.provider_id
+                    worker_info["model"] = vision_resolved.actual_model
+                    worker_info["route_attempts"].extend(vision_attempts)
+                    worker_info["observation_chars"] += len(observation_text)
+                    packet = make_evidence_packets([img], key, note=f"vision_worker:{vision_resolved.provider_id}/{vision_resolved.actual_model}", observation_text=observation_text)[0]
+                    if observation_text.strip():
+                        # 只缓存真实观察结果，失败/空结果下次重试，避免污染缓存
+                        cacheable.append(packet)
+                    else:
+                        worker_info["failed_images"] += 1
+                    new_packets.append(packet)
+                if cacheable:
+                    request.app.state.evidence_store.put_many(cacheable)
+                ok_count = len(new_images) - worker_info["failed_images"]
+                status = "success" if ok_count else "error"
+                steps.append(step("Vision Worker", "worker", status=status, summary=f"{worker_info['provider_id'] or 'vision'} / {worker_info['model'] or '?'} produced evidence for {ok_count}/{len(new_images)} new image(s), {len(cached_packets)} cached"))
+            elif new_images:
+                new_packets = make_evidence_packets(new_images, key)
+                steps.append(step("Vision Evidence", "worker", summary=f"{len(new_packets)} image(s) converted to placeholder evidence (no vision model configured)"))
+            else:
+                steps.append(step("Vision Cache Hit", "worker", summary=f"All {len(cached_packets)} image(s) resolved from evidence cache, vision worker skipped"))
+
+            evidence_packets = cached_packets + new_packets
+            payload = inject_evidence_into_chat_payload(payload, evidence_system_message(evidence_packets))
 
     if not images and references_previous_image(latest_user_text(protocol, body)):
         historical_evidence = request.app.state.evidence_store.recent(key, limit=3)
@@ -723,20 +724,15 @@ async def prepare_multimodal_context(request: Request, protocol: str, body: dict
             steps.append(step("Historical Vision Context", "worker", summary=f"Injected {len(historical_evidence)} previous evidence packet(s)"))
 
     return payload, forced_role, {
-        "images": images,
+        "images": [{"hash": img.get("hash"), "source_ref": img.get("source_ref")} for img in images],
         "evidence_packets": evidence_packets,
         "historical_evidence": historical_evidence,
         "capabilities": caps,
-        "vision_worker": {
-            "provider_id": locals().get("vision_resolved").provider_id if "vision_resolved" in locals() else None,
-            "model": locals().get("vision_resolved").actual_model if "vision_resolved" in locals() else None,
-            "route_attempts": locals().get("vision_attempts", []),
-            "observation_chars": len(locals().get("observation_text", "")),
-        },
+        "vision_worker": worker_info,
         "vision_cache": {
             "cached_count": len(cached_packets),
             "new_count": len(new_images),
-            "skipped_worker": bool(images) and not new_images,
+            "skipped_worker": bool(images) and not new_images and bool(cached_packets),
         },
     }
 

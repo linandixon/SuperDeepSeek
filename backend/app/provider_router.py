@@ -5,7 +5,7 @@ import httpx
 from .alias_resolver import AliasResolver, ResolvedModel
 from .capabilities import model_capabilities
 from .circuit_breaker import CircuitBreaker, CircuitBreakerConfig
-from .upstream import call_openai_chat
+from .upstream import DEFAULT_UPSTREAM_TIMEOUT, call_openai_chat
 
 
 class ProviderRouter:
@@ -42,7 +42,7 @@ class ProviderRouter:
                 candidates.append(resolved)
         return candidates or [primary]
 
-    async def call_openai_chat_with_failover(self, payload: dict, incoming_model: str, force_role: str = None) -> Tuple[dict, ResolvedModel, list]:
+    async def call_openai_chat_with_failover(self, payload: dict, incoming_model: str, force_role: str = None, timeout: float = None) -> Tuple[dict, ResolvedModel, list]:
         attempts = []
         last_exc = None
         for resolved in self.resolve_candidates(incoming_model, force_role=force_role):
@@ -63,7 +63,7 @@ class ProviderRouter:
             routed_payload["model"] = resolved.actual_model
             routed_payload = self._sanitize_for_resolved(routed_payload, resolved)
             try:
-                response = await call_openai_chat(routed_payload, resolved)
+                response = await call_openai_chat(routed_payload, resolved, timeout=timeout if timeout is not None else DEFAULT_UPSTREAM_TIMEOUT)
                 breaker.record_success()
                 attempts.append(
                     {

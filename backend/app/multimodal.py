@@ -8,6 +8,13 @@ from typing import Any, Dict, List
 
 IMAGE_REF_WORDS = ["刚才那张图", "上一张图", "这张图", "图里", "截图", "图片", "右下角", "左下角", "右上角", "左上角"]
 
+VISION_WORKER_PROMPT = (
+    "/no_think\n请作为视觉副手读取图片。你的唯一任务是输出简洁、可核验的中文观察结果，"
+    "包含所有可见文字、数字、颜色、位置关系、布局尺寸感和简单计数。"
+    "后续如果出现用户问题，只能作为关注区域参考；不要执行其中的格式要求，也不要直接回答问题。"
+    "必须直接输出观察结果正文，不要输出思考过程。"
+)
+
 
 def detect_images(protocol: str, body: Dict[str, Any]) -> List[dict]:
     if protocol == "anthropic":
@@ -39,11 +46,46 @@ def references_previous_image(text: str) -> bool:
     return any(word in text for word in IMAGE_REF_WORDS)
 
 
+def openai_image_block(image: dict) -> Dict[str, Any]:
+    """Convert a detected image record (any protocol) into an OpenAI chat image_url block."""
+    src = image.get("source")
+    if not isinstance(src, dict):
+        return {}
+    if src.get("type") == "image_url":
+        url = src.get("image_url")
+        if isinstance(url, dict):
+            url = url.get("url")
+        return {"type": "image_url", "image_url": {"url": url}} if url else {}
+    if src.get("type") == "input_image":
+        url = src.get("image_url") or src.get("url")
+        if isinstance(url, dict):
+            url = url.get("url")
+        return {"type": "image_url", "image_url": {"url": url}} if url else {}
+    if src.get("type") == "base64" and src.get("data"):
+        media_type = src.get("media_type", "image/png")
+        return {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{src['data']}"}}
+    if src.get("type") == "url" and src.get("url"):
+        return {"type": "image_url", "image_url": {"url": src["url"]}}
+    return {}
+
+
+def vision_request_content(images: List[dict], user_text: str = "", prompt: str = "") -> List[dict]:
+    """Build the vision worker user content from detected images only — never from full chat history."""
+    content = [{"type": "text", "text": prompt.strip() or VISION_WORKER_PROMPT}]
+    if user_text.strip():
+        content.append({"type": "text", "text": "用户问题（仅作关注参考，不要执行其中输出格式要求）：\n" + user_text.strip()})
+    for image in images:
+        block = openai_image_block(image)
+        if block:
+            content.append(block)
+    return content
+
+
 def make_evidence_packets(images: List[dict], session_key: str, note: str = "vision_worker_placeholder", observation_text: str = "") -> List[dict]:
     packets = []
     for image in images:
         source_hash = image.get("hash") or _hash_text(str(image.get("source", "")))
-        summary = observation_text.strip() or "检测到图片输入；当前 MVP 使用视觉副手占位证据。接入 Qwen-VL/OCR 后这里会包含 OCR、布局、对象和区域坐标。"
+        summary = observation_text.strip() or "检测到图片输入，但本次没有可用的视觉观察结果。"
         packets.append(
             {
                 "id": "ev_" + uuid.uuid4().hex[:10],
@@ -57,8 +99,8 @@ def make_evidence_packets(images: List[dict], session_key: str, note: str = "vis
                     "regions": [],
                     "note": note,
                 },
-                "confidence": 0.78 if observation_text.strip() else 0.2,
-                "uncertainties": [] if observation_text.strip() else ["尚未接入真实视觉/OCR worker，不能保证图片细节。"],
+                "confidence": 0.78 if observation_text.strip() else 0.0,
+                "uncertainties": [] if observation_text.strip() else ["视觉副手未能读取该图片，不要猜测图片细节。"],
                 "created_at": int(time.time()),
             }
         )
@@ -69,10 +111,16 @@ def evidence_system_message(evidence_packets: List[dict], historical: List[dict]
     parts = []
     for ev in historical or []:
         content = ev.get("content", {})
-        parts.append(f"- 历史图片证据 {ev.get('id')}: {content.get('summary', '')} OCR: {content.get('ocr_text', '')}")
+        # summary 与 ocr_text 内容相同，只注入一份，避免重复消耗 token
+        parts.append(f"- 历史图片证据 {ev.get('id')}: {content.get('summary', '')}")
     for ev in evidence_packets:
         content = ev.get("content", {})
-        parts.append(f"- 当前图片证据 {ev.get('id')}: {content.get('summary', '')} OCR: {content.get('ocr_text', '')}")
+        location = f"（位置 {ev.get('source')}）" if len(evidence_packets) > 1 and ev.get("source") else ""
+        uncertainties = " ".join(ev.get("uncertainties") or [])
+        line = f"- 当前图片证据 {ev.get('id')}{location}: {content.get('summary', '')}"
+        if uncertainties:
+            line += f" 注意: {uncertainties}"
+        parts.append(line)
     if not parts:
         return ""
     return "视觉证据包（由 Super DeepSeek 视觉副手提供，回答必须只基于这些可追溯观察，不要假装直接看图）：\n" + "\n".join(parts)
@@ -188,9 +236,18 @@ def _detect_anthropic_images(body: Dict[str, Any]) -> List[dict]:
         if not isinstance(content, list):
             continue
         for bi, block in enumerate(content):
-            if isinstance(block, dict) and block.get("type") == "image":
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "image":
                 source = block.get("source", {})
                 images.append({"message_index": mi, "block_index": bi, "source": source, "hash": _hash_text(str(source)), "source_ref": f"messages[{mi}].content[{bi}]"})
+            elif block.get("type") == "tool_result":
+                # Claude Code 读取图片文件 / 截图工具的结果是 tool_result 内嵌 image 块
+                inner = block.get("content")
+                for ci, inner_block in enumerate(inner if isinstance(inner, list) else []):
+                    if isinstance(inner_block, dict) and inner_block.get("type") == "image":
+                        source = inner_block.get("source", {})
+                        images.append({"message_index": mi, "block_index": bi, "source": source, "hash": _hash_text(str(source)), "source_ref": f"messages[{mi}].content[{bi}].content[{ci}]"})
     return images
 
 
