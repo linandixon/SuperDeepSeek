@@ -30,8 +30,10 @@ from .multimodal import (
     latest_user_text,
     make_evidence_packets,
     references_previous_image,
+    requests_recheck,
     responses_input_to_messages,
     vision_request_content,
+    vision_worker_prompt,
 )
 from .provider_presets import load_provider_presets
 from .provider_router import ProviderRouter
@@ -630,11 +632,12 @@ def session_key(request: Request, body: dict) -> str:
     return request.headers.get("x-superds-session-id") or request.headers.get("user-agent", "default")[:120] or "default"
 
 
-async def run_vision_worker(request: Request, images: list, user_text: str, incoming_model: str):
+async def run_vision_worker(request: Request, images: list, user_text: str, incoming_model: str, recheck: bool = False):
     worker_cfg = cfg(request).get("runtime", {}).get("vision_worker", {})
+    prompt = vision_worker_prompt(worker_cfg.get("prompt", ""), recheck=recheck)
     vision_payload = {
         "model": "vision",
-        "messages": [{"role": "user", "content": vision_request_content(images, user_text, worker_cfg.get("prompt", ""))}],
+        "messages": [{"role": "user", "content": vision_request_content(images, user_text, prompt)}],
         "stream": False,
         "max_tokens": int(worker_cfg.get("max_tokens", 2048)),
         "temperature": 0,
@@ -655,6 +658,7 @@ async def prepare_multimodal_context(request: Request, protocol: str, body: dict
     key = session_key(request, body)
     cached_packets = []
     new_images = []
+    recheck_packets = []
     worker_info = {"provider_id": None, "model": None, "route_attempts": [], "observation_chars": 0, "failed_images": 0}
 
     if images and caps.get("vision"):
@@ -674,9 +678,9 @@ async def prepare_multimodal_context(request: Request, protocol: str, body: dict
             # 按原始顺序收集缓存命中的 evidence packets，保证注入文本稳定
             cached_packets = [cached_map[h] for h in image_hashes if h in cached_map]
             new_packets = []
+            user_text = latest_user_text(protocol, body)
 
             if new_images and vision_model_id(config, resolved.profile_id):
-                user_text = latest_user_text(protocol, body)
                 results = await asyncio.gather(
                     *[run_vision_worker(request, [img], user_text, resolved.incoming_model) for img in new_images],
                     return_exceptions=True,
@@ -713,7 +717,32 @@ async def prepare_multimodal_context(request: Request, protocol: str, body: dict
             else:
                 steps.append(step("Vision Cache Hit", "worker", summary=f"All {len(cached_packets)} image(s) resolved from evidence cache, vision worker skipped"))
 
-            evidence_packets = cached_packets + new_packets
+            # ---- 用户对缓存的观察结果提出异议时，带着异议文本追加一次复核观察 ----
+            # 复核包只追加注入、不写缓存：temperature=0 下重跑同样输入没有意义，
+            # 复核的价值在于把异议作为新的关注点；不替换初次证据，避免误触发破坏好观察。
+            recheck_images = [img for img in images if img.get("hash") in cached_map]
+            if recheck_images and requests_recheck(user_text) and vision_model_id(config, resolved.profile_id):
+                results = await asyncio.gather(
+                    *[run_vision_worker(request, [img], user_text, resolved.incoming_model, recheck=True) for img in recheck_images],
+                    return_exceptions=True,
+                )
+                for img, result in zip(recheck_images, results):
+                    # 复核失败或为空就静默放弃，保留初次观察
+                    if isinstance(result, BaseException):
+                        continue
+                    observation_text, vision_resolved, vision_attempts = result
+                    worker_info["route_attempts"].extend(vision_attempts)
+                    if not observation_text.strip():
+                        continue
+                    worker_info["provider_id"] = worker_info["provider_id"] or vision_resolved.provider_id
+                    worker_info["model"] = worker_info["model"] or vision_resolved.actual_model
+                    worker_info["observation_chars"] += len(observation_text)
+                    packet = make_evidence_packets([img], key, note=f"vision_recheck:{vision_resolved.provider_id}/{vision_resolved.actual_model}", observation_text=observation_text)[0]
+                    recheck_packets.append(packet)
+                if recheck_packets:
+                    steps.append(step("Vision Recheck", "worker", summary=f"User disputed cached observation; re-observed {len(recheck_packets)}/{len(recheck_images)} image(s) with dispute text as focus"))
+
+            evidence_packets = cached_packets + new_packets + recheck_packets
             payload = inject_evidence_into_chat_payload(payload, evidence_system_message(evidence_packets))
 
     if not images and references_previous_image(latest_user_text(protocol, body)):
@@ -732,6 +761,7 @@ async def prepare_multimodal_context(request: Request, protocol: str, body: dict
         "vision_cache": {
             "cached_count": len(cached_packets),
             "new_count": len(new_images),
+            "recheck_count": len(recheck_packets),
             "skipped_worker": bool(images) and not new_images and bool(cached_packets),
         },
     }

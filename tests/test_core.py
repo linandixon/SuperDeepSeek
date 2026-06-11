@@ -13,7 +13,17 @@ from backend.app.capabilities import model_capabilities
 from backend.app.defaults import default_config
 from backend.app.evidence_store import EvidenceStore
 from backend.app.main import canonical_provider_model, ensure_provider_default_models, normalize_profile_payload, normalize_provider_payload, openai_to_responses_response, prepare_multimodal_context, remove_provider_from_config, responses_body_with_cached_context
-from backend.app.multimodal import detect_images, inject_evidence_into_chat_payload, make_evidence_packets, responses_input_to_messages, vision_request_content
+from backend.app.multimodal import (
+    VISION_RECHECK_SUFFIX,
+    VISION_WORKER_PROMPT,
+    detect_images,
+    inject_evidence_into_chat_payload,
+    make_evidence_packets,
+    requests_recheck,
+    responses_input_to_messages,
+    vision_request_content,
+    vision_worker_prompt,
+)
 from backend.app.provider_presets import load_provider_presets
 from backend.app.provider_router import ProviderRouter
 from backend.app.reasoning_state import extract_opaque_reasoning, validate_mimo_reasoning_history
@@ -685,6 +695,42 @@ class VisionSidekickTests(unittest.TestCase):
         # 失败结果不能写入缓存，下次请求要重试视觉副手
         images = detect_images("anthropic", _image_body(data="failcase"))
         self.assertEqual(self.evidence_store.get_by_hashes("sess-test", [images[0]["hash"]]), {})
+
+    def test_requests_recheck_keywords(self):
+        self.assertTrue(requests_recheck("你看错了，再仔细看一下右上角"))
+        self.assertTrue(requests_recheck("图里没看到你说的那个按钮啊"))
+        self.assertFalse(requests_recheck("帮我重构这个函数"))
+
+    def test_vision_worker_prompt_recheck_suffix(self):
+        self.assertEqual(vision_worker_prompt(), VISION_WORKER_PROMPT)
+        self.assertEqual(vision_worker_prompt(recheck=True), VISION_WORKER_PROMPT + VISION_RECHECK_SUFFIX)
+        # 配置自定义提示词时，复核后缀拼在自定义提示词之后
+        self.assertEqual(vision_worker_prompt("自定义", recheck=True), "自定义" + VISION_RECHECK_SUFFIX)
+
+    def test_sidekick_recheck_appends_packet_without_touching_cache(self):
+        self._prepare(_image_body())  # 第一次请求：生成并缓存初次观察
+        out_payload, _, mm, steps = self._prepare(_image_body(text="你看错了，重新看一下这张图"))
+        self.assertEqual(mm["vision_cache"]["cached_count"], 1)
+        self.assertEqual(mm["vision_cache"]["recheck_count"], 1)
+        self.assertTrue(any(s["name"] == "Vision Recheck" for s in steps))
+        system_texts = [m["content"] for m in out_payload["messages"] if m["role"] == "system"]
+        self.assertTrue(any("复核证据" in t and "以复核证据为准" in t for t in system_texts))
+        # 复核结果不写缓存：之后的正常提问仍然是纯缓存命中，不触发复核
+        _, _, mm3, _ = self._prepare(_image_body())
+        self.assertTrue(mm3["vision_cache"]["skipped_worker"])
+        self.assertEqual(mm3["vision_cache"]["recheck_count"], 0)
+
+    def test_recheck_failure_keeps_original_evidence(self):
+        self._prepare(_image_body())
+
+        async def _boom(*args, **kwargs):
+            raise RuntimeError("vision upstream down")
+
+        with mock.patch("backend.app.main.run_vision_worker", new=_boom):
+            out_payload, _, mm, steps = self._prepare(_image_body(text="你看错了，重新看一下这张图"))
+        self.assertEqual(mm["vision_cache"]["recheck_count"], 0)
+        system_texts = [m["content"] for m in out_payload["messages"] if m["role"] == "system"]
+        self.assertTrue(any("当前图片证据" in t for t in system_texts))
 
     def test_evidence_store_prunes_old_rows(self):
         packet = make_evidence_packets(detect_images("anthropic", _image_body()), "sess-test", observation_text="老观察")[0]
