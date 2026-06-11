@@ -694,7 +694,7 @@ class VisionSidekickTests(unittest.TestCase):
         self.assertTrue(any("视觉副手暂时不可用" in t for t in system_texts))
         # 失败结果不能写入缓存，下次请求要重试视觉副手
         images = detect_images("anthropic", _image_body(data="failcase"))
-        self.assertEqual(self.evidence_store.get_by_hashes("sess-test", [images[0]["hash"]]), {})
+        self.assertEqual(self.evidence_store.get_by_hashes([images[0]["hash"]]), {})
 
     def test_requests_recheck_keywords(self):
         self.assertTrue(requests_recheck("你看错了，再仔细看一下右上角"))

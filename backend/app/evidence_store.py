@@ -60,15 +60,19 @@ class EvidenceStore:
                     ),
                 )
 
-    def get_by_hashes(self, session_key: str, source_hashes: List[str]) -> Dict[str, dict]:
-        """Return {source_hash: evidence_packet} for images already analyzed in this session."""
+    def get_by_hashes(self, source_hashes: List[str]) -> Dict[str, dict]:
+        """Return {source_hash: evidence_packet} for images already analyzed (content-addressed, cross-session).
+
+        Observations are produced at temperature=0, so the same image always yields the same result.
+        Sharing the cache across sessions saves vision worker calls without leaking session context.
+        """
         if not source_hashes:
             return {}
         with closing(self._connect()) as db:
             placeholders = ",".join("?" for _ in source_hashes)
             rows = db.execute(
-                f"select source_hash, packet_json from evidence where session_key = ? and source_hash in ({placeholders}) order by created_at desc",
-                (session_key, *source_hashes),
+                f"select source_hash, packet_json from evidence where source_hash in ({placeholders}) order by created_at desc",
+                tuple(source_hashes),
             ).fetchall()
         result: Dict[str, dict] = {}
         for row in rows:
