@@ -84,7 +84,7 @@ def default_config() -> dict:
                 "id": "mimo",
                 "name": "Xiaomi MiMo",
                 "protocol": "openai",
-                "base_url": "https://api.xiaomimimo.com/v1",
+                "base_url": "https://token-plan-cn.xiaomimimo.com/v1",
                 "api_key_env": "MIMO_API_KEY",
                 "api_key": os.getenv("MIMO_API_KEY", ""),
                 "default_model": "mimo-v2.5-pro",

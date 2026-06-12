@@ -6,7 +6,10 @@
     "base_url": "https://api.deepseek.com/v1",
     "api_key_env": "DEEPSEEK_API_KEY",
     "default_model": "deepseek-chat",
-    "suggested_models": ["deepseek-chat", "deepseek-reasoner"],
+    "suggested_models": [
+      "deepseek-chat",
+      "deepseek-reasoner"
+    ],
     "category": "coding"
   },
   {
@@ -16,7 +19,11 @@
     "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "api_key_env": "QWEN_API_KEY",
     "default_model": "qwen2.5-coder-32b-instruct",
-    "suggested_models": ["qwen2.5-coder-32b-instruct", "qwen-max", "qwq-plus"],
+    "suggested_models": [
+      "qwen2.5-coder-32b-instruct",
+      "qwen-max",
+      "qwq-plus"
+    ],
     "category": "coding"
   },
   {
@@ -26,7 +33,11 @@
     "base_url": "https://api.moonshot.cn/v1",
     "api_key_env": "KIMI_API_KEY",
     "default_model": "moonshot-v1-128k",
-    "suggested_models": ["moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"],
+    "suggested_models": [
+      "moonshot-v1-8k",
+      "moonshot-v1-32k",
+      "moonshot-v1-128k"
+    ],
     "category": "long-context"
   },
   {
@@ -36,17 +47,25 @@
     "base_url": "https://openrouter.ai/api/v1",
     "api_key_env": "OPENROUTER_API_KEY",
     "default_model": "anthropic/claude-3.5-sonnet",
-    "suggested_models": ["anthropic/claude-3.5-sonnet", "deepseek/deepseek-chat", "qwen/qwen-2.5-coder-32b-instruct"],
+    "suggested_models": [
+      "anthropic/claude-3.5-sonnet",
+      "deepseek/deepseek-chat",
+      "qwen/qwen-2.5-coder-32b-instruct"
+    ],
     "category": "aggregator"
   },
   {
     "id": "mimo",
     "name": "Xiaomi MiMo",
     "protocol": "openai",
-    "base_url": "https://api.xiaomimimo.com/v1",
+    "base_url": "https://token-plan-cn.xiaomimimo.com/v1",
     "api_key_env": "MIMO_API_KEY",
     "default_model": "mimo-v2.5-pro",
-    "suggested_models": ["mimo-v2.5-pro", "mimo-v2.5", "mimo-v2.5-flash"],
+    "suggested_models": [
+      "mimo-v2.5-pro",
+      "mimo-v2.5",
+      "mimo-v2.5-flash"
+    ],
     "category": "reasoning"
   },
   {
@@ -56,7 +75,10 @@
     "base_url": "https://api.siliconflow.cn/v1",
     "api_key_env": "SILICONFLOW_API_KEY",
     "default_model": "deepseek-ai/DeepSeek-V3",
-    "suggested_models": ["deepseek-ai/DeepSeek-V3", "Qwen/Qwen2.5-Coder-32B-Instruct"],
+    "suggested_models": [
+      "deepseek-ai/DeepSeek-V3",
+      "Qwen/Qwen2.5-Coder-32B-Instruct"
+    ],
     "category": "aggregator"
   },
   {
@@ -66,7 +88,11 @@
     "base_url": "http://127.0.0.1:4000/v1",
     "api_key_env": "LITELLM_API_KEY",
     "default_model": "deepseek-chat",
-    "suggested_models": ["deepseek-chat", "qwen-coder", "local-model"],
+    "suggested_models": [
+      "deepseek-chat",
+      "qwen-coder",
+      "local-model"
+    ],
     "category": "local-gateway"
   },
   {
@@ -76,7 +102,11 @@
     "base_url": "http://127.0.0.1:11434/v1",
     "api_key_env": "OLLAMA_API_KEY",
     "default_model": "qwen2.5-coder:32b",
-    "suggested_models": ["qwen2.5-coder:32b", "deepseek-coder-v2", "llama3.1"],
+    "suggested_models": [
+      "qwen2.5-coder:32b",
+      "deepseek-coder-v2",
+      "llama3.1"
+    ],
     "category": "local"
   },
   {
@@ -86,7 +116,9 @@
     "base_url": "http://127.0.0.1:8000/v1",
     "api_key_env": "VLLM_API_KEY",
     "default_model": "local-model",
-    "suggested_models": ["local-model"],
+    "suggested_models": [
+      "local-model"
+    ],
     "category": "local"
   }
 ]
