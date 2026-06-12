@@ -38,6 +38,8 @@ class EvidenceStore:
             except sqlite3.OperationalError:
                 pass
             db.execute("create index if not exists idx_evidence_session_hash on evidence(session_key, source_hash)")
+            # get_by_hashes 按内容寻址、不带 session_key，复合索引服务不了这种查询
+            db.execute("create index if not exists idx_evidence_source_hash on evidence(source_hash)")
 
     def prune(self) -> None:
         if not self.retention_days:

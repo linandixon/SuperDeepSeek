@@ -12,10 +12,11 @@ from backend.app.circuit_breaker import CircuitBreaker, CircuitBreakerConfig
 from backend.app.capabilities import model_capabilities
 from backend.app.defaults import default_config
 from backend.app.evidence_store import EvidenceStore
-from backend.app.main import canonical_provider_model, ensure_provider_default_models, normalize_profile_payload, normalize_provider_payload, openai_to_responses_response, prepare_multimodal_context, remove_provider_from_config, responses_body_with_cached_context
+from backend.app.main import canonical_provider_model, ensure_provider_default_models, normalize_profile_payload, normalize_provider_payload, openai_to_responses_response, prepare_multimodal_context, remove_provider_from_config, responses_body_with_cached_context, session_key
 from backend.app.multimodal import (
     VISION_RECHECK_SUFFIX,
     VISION_WORKER_PROMPT,
+    conversation_fingerprint,
     detect_images,
     inject_evidence_into_chat_payload,
     make_evidence_packets,
@@ -731,6 +732,47 @@ class VisionSidekickTests(unittest.TestCase):
         self.assertEqual(mm["vision_cache"]["recheck_count"], 0)
         system_texts = [m["content"] for m in out_payload["messages"] if m["role"] == "system"]
         self.assertTrue(any("当前图片证据" in t for t in system_texts))
+
+    def test_session_key_prefers_conversation_header_over_user_agent(self):
+        req = SimpleNamespace(headers={"x-conversation-id": "conv-123", "user-agent": "CodeBuddyIDE/4.9.13"})
+        self.assertEqual(session_key(req, {"messages": []}), "conv-123")
+
+    def test_session_key_fingerprint_distinguishes_conversations(self):
+        # 没有任何会话标识时退化为首条用户消息指纹，而不是 user-agent
+        req = SimpleNamespace(headers={"user-agent": "SomeIDE/1.0"})
+        first_turn = {"messages": [{"role": "user", "content": "会话A的第一句话"}]}
+        later_turn = {"messages": [{"role": "user", "content": "会话A的第一句话"}, {"role": "assistant", "content": "好的"}, {"role": "user", "content": "继续"}]}
+        other_conv = {"messages": [{"role": "user", "content": "会话B的第一句话"}]}
+        self.assertEqual(session_key(req, first_turn), session_key(req, later_turn))
+        self.assertNotEqual(session_key(req, first_turn), session_key(req, other_conv))
+        self.assertNotEqual(session_key(req, first_turn), "SomeIDE/1.0")
+        self.assertEqual(conversation_fingerprint({"messages": []}), "")
+
+    def test_historical_evidence_stays_within_conversation(self):
+        # 会话 A 带图请求，观察结果存入会话 A 的命名空间
+        body = _image_body()
+        body.pop("metadata")
+        self.request.headers = {"x-conversation-id": "conv-A"}
+        self._prepare(body)
+        # 新会话 B 第一轮纯文本提到"这张图"，不能拉到会话 A 的历史证据
+        text_body = {"messages": [{"role": "user", "content": "帮我看一下这张图说了什么"}]}
+        self.request.headers = {"x-conversation-id": "conv-B"}
+        _, _, mm_b, steps_b = self._prepare(text_body)
+        self.assertEqual(mm_b["historical_evidence"], [])
+        self.assertFalse(any(s["name"] == "Historical Vision Context" for s in steps_b))
+        # 会话 A 自己的纯文本追问仍然能拿到历史证据
+        self.request.headers = {"x-conversation-id": "conv-A"}
+        _, _, mm_a, steps_a = self._prepare(text_body)
+        self.assertEqual(len(mm_a["historical_evidence"]), 1)
+        self.assertTrue(any(s["name"] == "Historical Vision Context" for s in steps_a))
+
+    def test_image_cache_is_content_addressed_across_sessions(self):
+        self._prepare(_image_body())
+        body = _image_body()
+        body["metadata"]["session_id"] = "sess-other"
+        _, _, mm, steps = self._prepare(body)
+        self.assertTrue(mm["vision_cache"]["skipped_worker"])
+        self.assertTrue(any(s["name"] == "Vision Cache Hit" for s in steps))
 
     def test_evidence_store_prunes_old_rows(self):
         packet = make_evidence_packets(detect_images("anthropic", _image_body()), "sess-test", observation_text="老观察")[0]
