@@ -1555,6 +1555,7 @@ async def stream_openai_passthrough(request: Request, payload: dict, resolved, t
         yield "data: " + json.dumps({"error": {"type": exc.__class__.__name__, "message": str(exc) or repr(exc)}}, ensure_ascii=False) + "\n\n"
         yield "data: [DONE]\n\n"
     finally:
+        provider_router(request).record_stream_result(resolved, error is None)
         latency_ms = int((time.perf_counter() - trace_record["start"]) * 1000)
         status = "error" if error else "success"
         if error:
@@ -1634,6 +1635,7 @@ async def stream_openai_as_anthropic(request: Request, payload: dict, resolved, 
     except Exception as exc:
         error = exc
         yield "event: error\ndata: " + json.dumps({"type": "error", "error": {"type": exc.__class__.__name__, "message": str(exc) or repr(exc)}}, ensure_ascii=False) + "\n\n"
+    provider_router(request).record_stream_result(resolved, error is None)
     if text_block_started:
         yield "event: content_block_stop\ndata: " + json.dumps({"index": text_block_index}, ensure_ascii=False) + "\n\n"
     for index in sorted(tool_calls):
@@ -1717,6 +1719,7 @@ async def stream_openai_as_responses(request: Request, payload: dict, resolved, 
         error = exc
         seq += 1
         yield "event: response.failed\ndata: " + json.dumps({"type": "response.failed", "sequence_number": seq, "response": {"id": response_id, "status": "failed", "error": {"type": exc.__class__.__name__, "message": str(exc) or repr(exc)}}}, ensure_ascii=False) + "\n\n"
+    provider_router(request).record_stream_result(resolved, error is None)
     output = []
     text = "".join(text_parts)
     added_empty_message = False

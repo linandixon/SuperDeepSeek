@@ -17,14 +17,18 @@ class ProviderRouter:
     def resolve_candidates(self, incoming_model: str, force_role: str = None) -> List[ResolvedModel]:
         primary = self.resolver.resolve(incoming_model, force_role=force_role)
         model_ids = self.resolver.model_ids_for_role(primary.profile_id, primary.role)
-        direct_model = next(
-            (
-                m
-                for m in self.config.get("models", [])
-                if incoming_model and incoming_model in {m.get("id"), m.get("actual_model"), m.get("litellm_model")}
-            ),
-            None,
-        )
+        # force_role 表示网关内部强制改道（如视觉副手），此时客户端写的模型名
+        # 不能再作为候选，否则图片请求会先打到不支持视觉的主模型上
+        direct_model = None
+        if force_role is None:
+            direct_model = next(
+                (
+                    m
+                    for m in self.config.get("models", [])
+                    if incoming_model and incoming_model in {m.get("id"), m.get("actual_model"), m.get("litellm_model")}
+                ),
+                None,
+            )
         if direct_model and direct_model.get("id") not in model_ids:
             model_ids = [direct_model.get("id")] + model_ids
         candidates = []
@@ -133,6 +137,15 @@ class ProviderRouter:
             )
             return routed_payload, resolved, attempts
         raise RuntimeError("No available provider candidates")
+
+    def record_stream_result(self, resolved: ResolvedModel, success: bool) -> None:
+        """流式请求在 prepare 阶段只选路不调用上游，结束后必须回填结果，
+        否则熔断器的失败计数永远不会被成功重置。"""
+        breaker = self._breaker(resolved)
+        if success:
+            breaker.record_success()
+        else:
+            breaker.record_failure()
 
     def status(self) -> dict:
         return {key: breaker.snapshot() for key, breaker in self.breakers.items()}

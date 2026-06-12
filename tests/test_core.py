@@ -440,6 +440,24 @@ class ProviderRouterTests(unittest.TestCase):
         candidates = router.resolve_candidates("mimo-v2.5-pro")
         self.assertEqual(candidates[0].provider_id, "mimo")
 
+    def test_force_role_excludes_direct_model_match(self):
+        # 视觉副手以 force_role="vision" 改道时，客户端原始模型名（非视觉模型）
+        # 不能混进候选，否则图片请求先打主模型、失败还会污染其熔断器
+        router = ProviderRouter(default_config())
+        candidates = router.resolve_candidates("deepseek-chat", force_role="vision")
+        self.assertEqual([c.provider_id for c in candidates], ["qwen"])
+        self.assertEqual(candidates[0].actual_model, "qwen-vl-max")
+
+    def test_record_stream_result_resets_breaker_failures(self):
+        router = ProviderRouter(default_config())
+        resolved = router.resolve_candidates("deepseek-chat")[0]
+        breaker = router._breaker(resolved)
+        breaker.record_failure()
+        breaker.record_failure()
+        router.record_stream_result(resolved, success=True)
+        self.assertEqual(breaker.snapshot()["consecutiveFailures"], 0)
+        self.assertEqual(breaker.snapshot()["state"], "closed")
+
 
 class CapabilityAndMultimodalTests(unittest.TestCase):
     def test_vision_model_capability_overrides_provider_default(self):
